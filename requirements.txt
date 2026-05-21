@@ -1,0 +1,28 @@
+# Spine MRI analysis pipeline — Python deps
+# Tested on: Google Colab, Python 3.10, CUDA 12.x, H100/A100
+# Install order matters; some packages need binary backends (ITK for pyradiomics).
+
+# Core scientific
+numpy
+scipy
+pandas
+matplotlib
+scikit-image
+
+# Medical imaging I/O
+nibabel
+pydicom
+SimpleITK
+
+# Radiomics
+pyradiomics
+
+# Spine segmentation
+TotalSegmentator
+totalspineseg
+spineps
+
+# Notebook tooling
+nbformat
+ipython
+jupyter

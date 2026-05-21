@@ -1,0 +1,29 @@
+# Spine MRI pipeline artifacts
+# Keep DICOM zip + notebook + results/findings.* in repo.
+# Exclude everything else generated at runtime.
+
+# Intermediate per-tool outputs (recomputed)
+results/intermediate/
+results/debug/
+
+# Model weights and external repos (downloaded at runtime)
+spine_work/
+weights/
+ext/
+
+# Raw and converted imaging (large, regenerable)
+*.nii
+*.nii.gz
+!results/**/*.nii.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
