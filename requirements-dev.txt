@@ -1,0 +1,7 @@
+# Dependencies for running the test suite (CPU-only; no torch / GPU tools).
+numpy
+nibabel
+scipy
+scikit-image
+pandas
+pytest
