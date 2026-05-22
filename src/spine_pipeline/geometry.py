@@ -72,6 +72,45 @@ def slab_si_extent_vox(slab2d):
     return int(si_present[-1] - si_present[0] + 1) if len(si_present) >= 2 else 0
 
 
+def col_si_extents(sag2d):
+    """SI voxel extent for EACH AP column of a sagittal projection (n_ap, n_si)."""
+    out = []
+    for j in range(sag2d.shape[0]):
+        si = np.where(sag2d[j])[0]
+        out.append(int(si[-1] - si[0] + 1) if len(si) >= 2 else 0)
+    return np.array(out)
+
+
+def body_heights_vox(body_mask, lr_axis=0, inset_frac=0.10, third_frac=0.30):
+    """Robust posterior/anterior body heights (in voxels) + AP span.
+
+    Measures the median SI extent over an edge-inset anterior/posterior third of
+    the body's sagittal projection. Using the median of an inset band (rather than
+    the extreme columns) avoids the rounded-corner taper that made the old
+    full-mask wedge angles spurious. Returns (post_h, ant_h, ap_span) or None.
+
+    Intended input is the vertebral BODY only (instance mask intersected with the
+    SPINEPS corpus label 49); feeding the full vertebra mask reintroduces the
+    spinous-process artifact.
+    """
+    sag = body_mask.any(axis=lr_axis)  # (n_ap, n_si)
+    ap_present = np.where(sag.any(axis=1))[0]
+    if len(ap_present) < 6:
+        return None
+    a0, a1 = int(ap_present[0]), int(ap_present[-1])
+    span = a1 - a0 + 1
+    h = col_si_extents(sag)[a0:a1 + 1]
+    inset = max(1, int(inset_frac * span))
+    third = max(2, int(third_frac * span))
+    post = h[inset:inset + third]                 # posterior = low AP index
+    ant = h[span - inset - third:span - inset]    # anterior  = high AP index
+    post = post[post > 0]
+    ant = ant[ant > 0]
+    if len(post) < 1 or len(ant) < 1:
+        return None
+    return float(np.median(post)), float(np.median(ant)), span
+
+
 def vertebra_metrics(data, zooms, ap_axis=1, si_axis=2, lr_axis=0,
                      slab_thickness=3, min_voxels=100):
     """Per-vertebra geometry (AP width, ant/post heights, wedge angle).

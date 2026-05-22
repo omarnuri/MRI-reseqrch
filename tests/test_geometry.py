@@ -5,7 +5,9 @@ import numpy as np
 from spine_pipeline.geometry import (
     LABEL_NAMES,
     angle_deg,
+    body_heights_vox,
     centroid_global_metrics,
+    col_si_extents,
     parse_centroids,
     slab_si_extent_vox,
     vertebra_metrics,
@@ -106,3 +108,36 @@ def test_vertebra_metrics_ignores_labels_over_24():
     data = np.zeros((20, 30, 40), np.int32)
     data[5:15, 8:22, 10:30] = 50
     assert vertebra_metrics(data, (1, 1, 1)) == []
+
+
+def test_col_si_extents_per_column():
+    sag = np.zeros((4, 10), bool)
+    sag[1, 2:7] = True   # SI extent 5
+    sag[2, 0:10] = True  # SI extent 10
+    e = col_si_extents(sag)
+    assert list(e) == [0, 5, 10, 0]
+
+
+def test_body_heights_uniform_block():
+    # axis0=L->R, axis1=P->A, axis2=I->S; a clean body block => ant ~ post
+    body = np.zeros((6, 20, 30), bool)
+    body[1:5, 4:16, 5:25] = True   # AP span 12, SI height 20
+    post_h, ant_h, span = body_heights_vox(body, lr_axis=0)
+    assert span == 12
+    assert abs(post_h - 20) < 1.5 and abs(ant_h - 20) < 1.5
+
+
+def test_body_heights_detects_anterior_wedge():
+    # SI height shrinks toward the anterior (high AP index) => posterior taller
+    body = np.zeros((6, 24, 40), bool)
+    for j in range(4, 20):
+        h = 30 - (j - 4)            # 30 (posterior) down to 15 (anterior)
+        body[1:5, j, 5:5 + h] = True
+    post_h, ant_h, span = body_heights_vox(body, lr_axis=0)
+    assert post_h > ant_h           # positive (anterior) wedge — Scheuermann pattern
+
+
+def test_body_heights_too_small_returns_none():
+    body = np.zeros((6, 20, 30), bool)
+    body[2, 2:5, 5:8] = True        # < 6 AP columns
+    assert body_heights_vox(body, lr_axis=0) is None
