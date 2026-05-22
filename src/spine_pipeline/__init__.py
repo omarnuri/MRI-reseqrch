@@ -26,6 +26,7 @@ from .costovertebral import bright_mask, side_bright_fractions
 from .agreement import dice
 from .outputs import detect_seg_outputs, clean_reason, load_json
 from .aggregate import merge_per_vertebra, build_findings
+from .perf import measure_tool, aggregate_performance, write_performance_log
 
 __all__ = [
     "to_jsonable",
@@ -54,4 +55,7 @@ __all__ = [
     "load_json",
     "merge_per_vertebra",
     "build_findings",
+    "measure_tool",
+    "aggregate_performance",
+    "write_performance_log",
 ]
