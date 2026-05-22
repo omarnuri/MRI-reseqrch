@@ -34,3 +34,52 @@ def muscle_side_metrics(mask, t2_norm, fatty_thresh=0.6):
         "fatty_frac_left": round(fatty_left, 3),
         "fatty_frac_right": round(fatty_right, 3),
     }
+
+
+def fatty_fraction_from_t1(mask_full, t1_volume, percentile_within=75):
+    """Goutallier-style fatty-infiltration proxy from T1.
+
+    Fat is brightest on T1 (white), muscle is mid-gray. Computing
+    `(t2 > 0.6)` (the old approach) over a T2 image catches CSF/fluid as
+    well as fat and is the reason fatty_frac came out 0.0 on findings_8.
+
+    This function defines the "fatty" threshold relative to the in-muscle
+    intensity distribution: the top `percentile_within`% of voxels inside
+    the muscle mask are flagged. Returns left and right fatty fractions
+    (split on axis 0 = L->R in canonical RAS) plus the threshold actually
+    used, so the value is reproducible.
+    """
+    mask_full = mask_full.astype(bool)
+    if not mask_full.any():
+        return {
+            "fatty_frac_left_t1": 0.0,
+            "fatty_frac_right_t1": 0.0,
+            "fat_threshold_intensity": None,
+            "method": "T1_percentile_within_muscle",
+        }
+    in_muscle = t1_volume[mask_full]
+    if in_muscle.size < 50:
+        return {
+            "fatty_frac_left_t1": 0.0,
+            "fatty_frac_right_t1": 0.0,
+            "fat_threshold_intensity": None,
+            "method": "T1_percentile_within_muscle",
+        }
+    fat_threshold = float(np.percentile(in_muscle, percentile_within))
+
+    mid_x = mask_full.shape[0] // 2
+    left = mask_full.copy()
+    left[mid_x:, :, :] = False
+    right = mask_full.copy()
+    right[:mid_x, :, :] = False
+
+    fatty_left = float(((t1_volume > fat_threshold) & left).sum()) / max(int(left.sum()), 1)
+    fatty_right = float(((t1_volume > fat_threshold) & right).sum()) / max(int(right.sum()), 1)
+
+    return {
+        "fatty_frac_left_t1": round(fatty_left, 3),
+        "fatty_frac_right_t1": round(fatty_right, 3),
+        "fat_threshold_intensity": round(fat_threshold, 1),
+        "method": f"T1_percentile_within_muscle_p{percentile_within}",
+    }
+

@@ -40,3 +40,35 @@ def pick_sequence(sequence_info, seq, orient):
     cands = [s for s in sequence_info
              if s.get("sequence") == seq and s.get("orientation") == orient]
     return cands[0]["nifti"] if cands else None
+
+
+def pick_any_orientation(sequence_info, seq, prefer=("sagittal", "coronal", "axial")):
+    """Pick a sequence of type `seq` in any preferred orientation.
+
+    Returns (nifti_path, orientation) or (None, None). Used to recover
+    STIR (or T2_FS as fallback) when the gold-standard sagittal STIR is
+    missing but coronal/axial STIR is present in the study — without this
+    the edema-detection path stays inactive on otherwise-usable data.
+    """
+    for orient in prefer:
+        for s in sequence_info:
+            if s.get("sequence") == seq and s.get("orientation") == orient:
+                return s.get("nifti"), orient
+    return None, None
+
+
+def pick_stir_or_fatsat(sequence_info):
+    """Pick the best STIR/fat-suppressed sequence available, any orientation.
+
+    Returns (nifti_path, orientation, source) where `source` is "STIR" or
+    "T2_FS" so downstream code can label the anomaly method honestly.
+    Preference order: STIR (sag>cor>ax) > T2_FS (sag>cor>ax).
+    """
+    nii, orient = pick_any_orientation(sequence_info, "STIR")
+    if nii:
+        return nii, orient, "STIR"
+    nii, orient = pick_any_orientation(sequence_info, "T2_FS")
+    if nii:
+        return nii, orient, "T2_FS"
+    return None, None, None
+

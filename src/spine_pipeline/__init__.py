@@ -8,7 +8,7 @@ changing logic here.
 """
 
 from .serialization import to_jsonable
-from .sequences import classify, pick_sequence
+from .sequences import classify, pick_sequence, pick_any_orientation, pick_stir_or_fatsat
 from .geometry import (
     LABEL_NAMES,
     angle_deg,
@@ -21,7 +21,7 @@ from .geometry import (
 )
 from .anomaly import zscore_anomaly
 from .discs import rank_discs
-from .muscles import normalize_t2, muscle_side_metrics
+from .muscles import normalize_t2, muscle_side_metrics, fatty_fraction_from_t1
 from .costovertebral import bright_mask, side_bright_fractions
 from .agreement import dice
 from .outputs import detect_seg_outputs, clean_reason, load_json
@@ -31,6 +31,8 @@ __all__ = [
     "to_jsonable",
     "classify",
     "pick_sequence",
+    "pick_any_orientation",
+    "pick_stir_or_fatsat",
     "LABEL_NAMES",
     "angle_deg",
     "parse_centroids",
@@ -43,6 +45,7 @@ __all__ = [
     "rank_discs",
     "normalize_t2",
     "muscle_side_metrics",
+    "fatty_fraction_from_t1",
     "bright_mask",
     "side_bright_fractions",
     "dice",
