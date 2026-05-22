@@ -15,6 +15,8 @@ from .geometry import (
     parse_centroids,
     centroid_global_metrics,
     slab_si_extent_vox,
+    col_si_extents,
+    body_heights_vox,
     vertebra_metrics,
 )
 from .anomaly import zscore_anomaly
@@ -34,6 +36,8 @@ __all__ = [
     "parse_centroids",
     "centroid_global_metrics",
     "slab_si_extent_vox",
+    "col_si_extents",
+    "body_heights_vox",
     "vertebra_metrics",
     "zscore_anomaly",
     "rank_discs",
