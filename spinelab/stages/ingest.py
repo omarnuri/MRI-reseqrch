@@ -50,9 +50,36 @@ def _run_dcm2niix(dicom_dir: Path, nifti_dir: Path) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
+def _fetch_url(url: str, dest_dir: Path) -> Path:
+    """Download an archive into the workspace.
+
+    Convenience for Colab, where the runtime's connection is fast and the operator's
+    is not: the study can be pulled straight into the VM instead of being uploaded
+    from a slow local link. The archive still must not live in a public repository —
+    see docs/PRIVACY.md — and once that repository is private this needs a token,
+    at which point Drive is the simpler path.
+    """
+    import urllib.parse
+    import urllib.request
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    name = Path(urllib.parse.urlparse(url).path).name or "study.zip"
+    target = dest_dir / urllib.parse.unquote(name)
+    if target.exists() and target.stat().st_size > 0:
+        return target
+    tmp = target.with_suffix(target.suffix + ".part")
+    urllib.request.urlretrieve(url, tmp)  # noqa: S310 - explicit user-provided URL
+    tmp.replace(target)
+    return target
+
+
 def run(ctx: Context) -> StageResult:
     cfg = ctx.config
-    source = Path(cfg.dicom_source) if cfg.dicom_source else None
+    raw_source = cfg.dicom_source or ""
+    if raw_source.startswith(("http://", "https://")):
+        source = _fetch_url(raw_source, cfg.data_dir / "download")
+    else:
+        source = Path(raw_source) if raw_source else None
     if source is None or not source.exists():
         raise SkipStage(f"dicom_source not found: {cfg.dicom_source!r}")
 
