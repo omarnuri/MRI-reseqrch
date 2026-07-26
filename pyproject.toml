@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spinelab"
+version = "0.3.0"
+description = "Resumable, inference-only spine MRI analysis pipeline for Google Colab (research use only)"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "nibabel>=5.2",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "pydicom>=2.4",
+]
+
+[project.optional-dependencies]
+# Heavy segmentation stack — installed inside Colab, never needed for the unit tests.
+segmentation = [
+    "SPINEPS>=2.0.0",
+    "totalspineseg>=20260623",
+    "TotalSegmentator>=2.16.0",
+    "nnunetv2>=2.8.1",
+]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+spinelab = "spinelab.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["spinelab*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
