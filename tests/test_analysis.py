@@ -13,8 +13,10 @@ from spinelab.analysis import (
     canal_area_profile,
     curvature_metrics,
     dice,
+    label_agreement,
     longest_run,
     midline_index,
+    mirror_side_labels,
     modified_z,
     robust_threshold,
     screen_region,
@@ -233,6 +235,79 @@ class TestSides:
         left, right = split_by_midline(mask, 5)
         assert left[:5].all() and not left[5:].any()
         assert right[5:].all() and not right[:5].any()
+
+
+class TestMirrorTTA:
+    """Mirror test-time augmentation: does the model keep sides straight?"""
+
+    def _semantic(self):
+        sem = np.zeros((20, 8, 8), dtype=np.int32)
+        sem[2:5, 3:5, 3:5] = L.SUPERIOR_ARTICULAR_LEFT     # 45
+        sem[15:18, 3:5, 3:5] = L.SUPERIOR_ARTICULAR_RIGHT   # 46
+        sem[6:8, 3:5, 3:5] = L.COSTAL_PROCESS_LEFT          # 43
+        sem[12:14, 3:5, 3:5] = L.COSTAL_PROCESS_RIGHT       # 44
+        sem[9:11, 3:5, 3:5] = L.SPINOSUS_PROCESS            # 42, midline
+        return sem
+
+    def test_swap_is_an_involution(self):
+        sem = self._semantic()
+        assert np.array_equal(mirror_side_labels(mirror_side_labels(sem)), sem)
+
+    def test_midline_labels_are_untouched(self):
+        sem = self._semantic()
+        swapped = mirror_side_labels(sem)
+        assert np.array_equal(swapped == L.SPINOSUS_PROCESS, sem == L.SPINOSUS_PROCESS)
+
+    def test_a_side_consistent_model_round_trips(self):
+        # The full mirror-TTA path. The key subtlety: a model reads sides off the
+        # *appearance* of the volume it is given, so on a mirrored study the
+        # structure that is anatomically left now looks right and gets the right
+        # label. Simulating the model as identity-on-labels would be wrong.
+        sem = self._semantic()
+
+        def perfect_model(volume):
+            """Labels by appearance: geometry as given, sides named by position."""
+            return mirror_side_labels(volume) if volume is mirrored else volume
+
+        mirrored = np.flip(sem, axis=0)          # what the segmenter is fed
+        prediction = perfect_model(mirrored)      # its output, sides named by appearance
+        restored = mirror_side_labels(np.flip(prediction, axis=0))
+        assert np.array_equal(restored, sem)
+
+    def test_a_model_that_confuses_sides_is_detected(self):
+        sem = self._semantic()
+        confused = sem.copy()
+        # Simulate a model that put the right facet label on the left structure.
+        confused[confused == L.SUPERIOR_ARTICULAR_LEFT] = L.SUPERIOR_ARTICULAR_RIGHT
+        agreement = label_agreement(sem, confused, (45, 46, 47, 48))
+        assert agreement["per_label_dice"]["45"] == 0.0
+        assert agreement["min_dice"] == 0.0
+
+
+class TestLabelAgreement:
+    def test_identical_volumes_score_one(self):
+        sem = np.zeros((6, 6, 6), dtype=np.int32)
+        sem[1:3] = 45
+        out = label_agreement(sem, sem, (45,))
+        assert out["per_label_dice"]["45"] == 1.0
+        assert out["mean_dice"] == 1.0
+
+    def test_absent_label_is_none_not_zero(self):
+        sem = np.zeros((4, 4, 4), dtype=np.int32)
+        out = label_agreement(sem, sem, (45,))
+        assert out["per_label_dice"]["45"] is None
+        assert out["mean_dice"] is None
+
+    def test_reports_the_weakest_label(self):
+        a = np.zeros((10, 4, 4), dtype=np.int32)
+        b = np.zeros((10, 4, 4), dtype=np.int32)
+        a[0:4] = 45
+        b[0:4] = 45          # perfect
+        a[5:9] = 46
+        b[8:9] = 46          # poor
+        out = label_agreement(a, b, (45, 46))
+        assert out["weakest_label"] == "46"
+        assert out["per_label_dice"]["45"] == 1.0
 
 
 class TestCanal:

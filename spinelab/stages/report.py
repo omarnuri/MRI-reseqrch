@@ -54,6 +54,7 @@ def run(ctx: Context) -> StageResult:
     sections.append(_canal_section(ctx))
     sections.append(_disc_section(ctx))
     sections.append(_agreement_section(ctx))
+    sections.append(_reliability_section(ctx))
     sections.append(_not_assessable_section(ctx, picks))
     sections.append(_status_section(ctx))
 
@@ -309,6 +310,67 @@ def _agreement_section(ctx: Context) -> str:
                "требуют визуальной проверки.</div>"))
 
 
+def _reliability_section(ctx: Context) -> str:
+    """Alignment and per-level model agreement — the caveats behind every number."""
+    blocks = []
+
+    reg = ctx.stage_data("register")
+    if reg:
+        r = reg.get("registration") or {}
+        applied = reg.get("applied")
+        blocks.append(
+            f"<h3>Совмещение серий {badge_html(Evidence.MEASUREMENT)}</h3>"
+            f"<p>Маски с сагиттальной T2 переносились на "
+            f"{html.escape(str(reg.get('fixed_plane')))} серию с подавлением жира. "
+            f"Поправка на движение между сериями: сдвиг "
+            f"<b>{r.get('translation_magnitude_mm','—')} мм</b>, поворот "
+            f"<b>{r.get('rotation_deg','—')}°</b>. Применена: <b>"
+            f"{'да' if applied else 'нет'}</b>.</p>"
+            + ("" if applied else
+               f"<div class='warn'>{html.escape(str(r.get('reason') or 'не применена'))} — "
+               "маски стоят там, где их поместила геометрия DICOM. Разницу меньше "
+               "нескольких миллиметров считать шумом совмещения.</div>")
+        )
+
+    cross = ctx.stage_data("crosscheck")
+    if cross:
+        rows = "".join(
+            f"<tr><td>{html.escape(r['level'])}</td><td>{r.get('dice','—')}</td>"
+            f"<td>{'да' if r.get('reliable') else 'нет'}</td></tr>"
+            for r in cross.get("levels", [])
+        )
+        weak = cross.get("levels_needing_visual_check") or []
+        blocks.append(
+            f"<h3>Согласие двух независимых моделей по уровням {badge_html(Evidence.MODEL)}</h3>"
+            f"<p class='mute'>Вторая модель: {html.escape(str(cross.get('second_model')))}. "
+            f"Средний Dice: {cross.get('mean_dice','—')}.</p>"
+            f"<table><tr><th>Уровень</th><th>Dice</th><th>Надёжно</th></tr>{rows}</table>"
+            + (f"<div class='warn'>Смотреть глазами перед доверием числам: "
+               f"{', '.join(html.escape(w) for w in weak)}.</div>" if weak else
+               "<div class='box'>Модели согласуются на всех уровнях.</div>")
+        )
+
+    mirror = (ctx.stage_data("spineps") or {}).get("mirror_consistency") or {}
+    if mirror.get("tested"):
+        agreement = mirror.get("side_label_agreement") or {}
+        stable = mirror.get("sides_stable")
+        blocks.append(
+            f"<h3>Устойчивость определения стороны {badge_html(Evidence.MODEL)}</h3>"
+            f"<p>Модель прогнана повторно на зеркально отражённой копии; метки сторон "
+            f"возвращены обратно и сравнены. Минимальный Dice по меткам сторон: "
+            f"<b>{agreement.get('min_dice','—')}</b> (слабейшая метка: "
+            f"{html.escape(str(agreement.get('weakest_label')))}).</p>"
+            + ("<div class='box'>Определение лево/право устойчиво — сравнения сторон "
+               "выше можно читать.</div>" if stable else
+               "<div class='warn'>Определение лево/право <b>неустойчиво</b> на этом объёме. "
+               "Ни одно сравнение сторон в этом прогоне не следует считать надёжным.</div>")
+        )
+
+    if not blocks:
+        return ""
+    return "<h2>9. Надёжность: совмещение и согласие моделей</h2>" + "".join(blocks)
+
+
 def _not_assessable_section(ctx: Context, picks: dict) -> str:
     """The most important section: what this study cannot answer at all."""
     items = [
@@ -329,7 +391,7 @@ def _not_assessable_section(ctx: Context, picks: dict) -> str:
     ]
     if not picks.get("T2_AX"):
         items.append("В этом исследовании <b>нет аксиальной T2</b> — см. пункт про плоскость.")
-    return ("<h2>9. Чего эти данные не могут показать</h2><div class='warn'><ul>"
+    return ("<h2>10. Чего эти данные не могут показать</h2><div class='warn'><ul>"
             + "".join(f"<li>{i}</li>" for i in items) + "</ul></div>")
 
 
@@ -340,7 +402,7 @@ def _status_section(ctx: Context) -> str:
         rows.append(f"<tr><td><code>{html.escape(name)}</code></td>"
                     f"<td>{html.escape(status)}</td>"
                     f"<td>{html.escape(res.reason or '—')}</td></tr>")
-    return ("<h2>10. Что выполнялось</h2><table><tr><th>Этап</th><th>Статус</th>"
+    return ("<h2>11. Что выполнялось</h2><table><tr><th>Этап</th><th>Статус</th>"
             f"<th>Причина / примечание</th></tr>{''.join(rows)}</table>")
 
 

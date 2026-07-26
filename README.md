@@ -21,6 +21,7 @@ DICOM-архив кладётся **в Drive**, не в репозиторий (
 
 ```bash
 python -m spinelab run --dicom /path/study.zip --cache ~/spinelab-cache
+python -m spinelab run --dicom /path/study.zip --quality --tta-mirror   # 24+ ГБ VRAM
 python -m spinelab run --only marrow,posterior,report --force marrow
 python -m spinelab audit --dicom /path/dicom       # какие PHI-теги есть в заголовках
 python -m spinelab deid  --dicom /path/dicom --out /path/anon
@@ -41,6 +42,8 @@ python -m pytest -q
 | `spineps` | SPINEPS 2.0 (+ VERIDAH labeling) | тела позвонков, **задние элементы по сторонам**, нумерация | модель |
 | `totalspineseg` | TotalSpineSeg | спинной мозг, канал, диски по уровням | модель |
 | `totalsegmentator` | TotalSegmentator MRI | параспинальные мышцы, рёбра | модель |
+| `register` | SimpleITK | совмещение масок с fat-sat серией (поправка на движение между сериями) | измерение |
+| `crosscheck` | TotalSegmentator `vertebrae_mr` | согласие двух независимых моделей по уровням (профиль quality) | модель |
 | `geometry` | — | высоты тел, углы клиновидности, правило Шейермана, кривизна | измерение |
 | `muscles` | — | объём и лево-правая асимметрия мышц | измерение |
 | `marrow` | — | неоднородность сигнала в телах позвонков (**только при fat-sat**) | эвристика |

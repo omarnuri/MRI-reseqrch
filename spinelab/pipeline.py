@@ -94,6 +94,19 @@ class Context:
     def path_list(self, stage: str, key: str) -> list[Path]:
         return [Path(p) for p in (self.stage_data(stage).get(key) or [])]
 
+    def masks_in_fatsat_space(self) -> dict | None:
+        """Masks already resampled onto the fat-suppressed grid by `register`.
+
+        Returns None when that stage did not run, in which case callers fall back
+        to header-based resampling. The distinction matters: at facet scale a
+        couple of millimetres of inter-series motion moves the region of interest
+        off the joint, so whether alignment was refined has to stay visible.
+        """
+        data = self.stage_data("register")
+        if data.get("space") == "fatsat" and data.get("instance_mask"):
+            return data
+        return None
+
 
 class SkipStage(Exception):
     """Raised by a stage when its inputs are legitimately absent.
@@ -110,8 +123,9 @@ def _registry() -> dict[str, StageFn]:
     # Imported lazily so `import spinelab.pipeline` stays cheap and so a missing
     # optional dependency only breaks the stage that needs it.
     from .stages import (
-        agreement, canal, discs, geometry, ingest, marrow, muscles, posterior,
-        radiomics, report, seg_spineps, seg_totalsegmentator, seg_totalspineseg,
+        agreement, canal, crosscheck, discs, geometry, ingest, marrow, muscles,
+        posterior, radiomics, register, report, seg_spineps,
+        seg_totalsegmentator, seg_totalspineseg,
     )
 
     return {
@@ -119,6 +133,8 @@ def _registry() -> dict[str, StageFn]:
         "spineps": seg_spineps.run,
         "totalspineseg": seg_totalspineseg.run,
         "totalsegmentator": seg_totalsegmentator.run,
+        "register": register.run,
+        "crosscheck": crosscheck.run,
         "geometry": geometry.run,
         "muscles": muscles.run,
         "marrow": marrow.run,

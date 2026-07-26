@@ -56,6 +56,31 @@ enforces the wording side of this.
 9. **PHI stays out of the repo and out of the report.** Data lives on Drive. The
    report prints `subject_id` only.
 
+## Alignment and reliability stages
+
+`register` moves the SPINEPS masks (computed on sagittal T2) onto the
+fat-suppressed series with a rigid, mutual-information refinement of the header
+alignment. Rationale: a facet joint is 2-4 mm across, smaller than normal
+inter-series patient motion. A correction beyond 15 mm / 10 deg is rejected as a
+failed optimisation rather than trusted. Downstream stages check
+`ctx.masks_in_fatsat_space()` and record `masks_motion_corrected`; when it is
+False they must state that the masks are header-placed and that small left/right
+differences are within alignment noise.
+
+`crosscheck` (quality profile) runs TotalSegmentator's `vertebrae_mr` and reports
+per-level Dice against SPINEPS. Registration cannot add coverage: structures
+outside the fat-suppressed slab stay unmeasurable, and that is reported, not
+interpolated over.
+
+Mirror TTA (`Config.tta_mirror`) re-runs the segmenter on an L-R mirrored copy,
+mirrors the result back and swaps side-specific label ids
+(`analysis.mirror_side_labels`: 43↔44, 45↔46, 47↔48, 63↔64). Note the subtlety a
+test already caught: a model names sides by *appearance*, so on a mirrored study
+the anatomically-left structure gets the right-side label — which is why the swap
+is needed and why simulating the model as identity-on-labels is wrong. Low
+agreement here invalidates every left/right number in the run, and the report says
+so.
+
 ## Adding a stage
 
 ```python

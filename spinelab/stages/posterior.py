@@ -61,6 +61,14 @@ def run(ctx: Context) -> StageResult:
     fat_suppressed = bool(fatsat)
     evidence = Evidence.HEURISTIC if fat_suppressed else Evidence.NOT_DIAGNOSTIC
 
+    # Masks moved by `register` are motion-corrected onto this exact series; at
+    # facet scale (2-4 mm) that correction decides whether the region of interest
+    # sits on the joint at all.
+    registered = ctx.masks_in_fatsat_space() if fat_suppressed else None
+    if registered and registered.get("semantic_mask"):
+        semantic_masks = [registered["semantic_mask"]]
+        instance_masks = [registered["instance_mask"]] if registered.get("instance_mask") else []
+
     img = load_canonical(reference)
     image = np.asarray(img.get_fdata(), dtype=float)
     sem = np.asarray(resample_mask_to(load_canonical(semantic_masks[0]), img)
@@ -167,9 +175,25 @@ def run(ctx: Context) -> StageResult:
             "the coronal plane, so a sagittal-only acquisition under-samples them; an axial "
             "or oblique fat-suppressed series is what a targeted question needs.")
 
+    if registered and registered.get("applied"):
+        limits.append(
+            "Masks were rigidly aligned onto this series before measuring, so "
+            "inter-series patient motion is corrected (see the register stage)."
+        )
+    else:
+        # Covers both "register never ran" and "register ran but the correction was
+        # rejected". In each case the masks sit where the DICOM geometry put them,
+        # and the caveat is the same.
+        limits.append(
+            "Masks were placed by DICOM header geometry only — no motion correction was "
+            "applied between series. At facet scale a few millimetres matter, so treat a "
+            "small left/right difference as within alignment noise."
+        )
+
     payload = {
         "reference_image": reference,
         "fat_suppressed": fat_suppressed,
+        "masks_motion_corrected": bool(registered and registered.get("applied")),
         "groups": groups_out,
         "warnings": warnings,
         "interpretation_limits": limits,

@@ -91,17 +91,89 @@ def run(ctx: Context) -> StageResult:
         missing = "semantic (posterior elements)" if not semantic_masks else "instance"
         reason = f"{missing} mask missing — dependent stages will report reduced scope"
 
+    data = {
+        "instance_masks": [str(p) for p in instance_masks],
+        "semantic_masks": [str(p) for p in semantic_masks],
+        "centroid_files": [str(p) for p in centroids],
+        "models_dir": models_dir,
+        "version": _spineps_version(),
+    }
+
+    if cfg.quality and cfg.tta_mirror and semantic_masks:
+        data["mirror_consistency"] = _mirror_consistency(
+            t2_sag, semantic_masks[0], out_dir, env, cfg)
+
     return StageResult(
         name="spineps", status=status, evidence=Evidence.MODEL, reason=reason,
-        data={
-            "instance_masks": [str(p) for p in instance_masks],
-            "semantic_masks": [str(p) for p in semantic_masks],
-            "centroid_files": [str(p) for p in centroids],
-            "models_dir": models_dir,
-            "version": _spineps_version(),
-        },
+        data=data,
         artifacts=[str(p) for p in instance_masks + semantic_masks],
     )
+
+
+def _mirror_consistency(t2_sag: str, semantic_mask: str, out_dir: Path, env: dict, cfg) -> dict:
+    """Is the model's LEFT/RIGHT assignment stable under mirroring?
+
+    Run the segmenter again on a left-right mirrored copy of the study, mirror the
+    result back, swap the side-specific label ids, and compare. High agreement on
+    labels 43-48 means the side assignment is a property of the anatomy; low
+    agreement means it is a property of this particular volume, and every
+    left/right number in this run is then unreliable.
+
+    Everything is written under a name that cannot be mistaken for real data: a
+    mirrored study is a physically impossible patient.
+    """
+    import numpy as np
+
+    from ..analysis import label_agreement, mirror_side_labels
+    from ..utils import load_canonical
+
+    result: dict = {"tested": False}
+    try:
+        import nibabel as nib
+
+        mirror_dir = out_dir / "mirror_tta"
+        mirror_dir.mkdir(parents=True, exist_ok=True)
+        src = load_canonical(t2_sag)
+        flipped = np.flip(np.asarray(src.get_fdata()), axis=0)
+        mirrored_path = mirror_dir / "MIRRORED_DO_NOT_USE_AS_DATA.nii.gz"
+        nib.save(nib.Nifti1Image(flipped, src.affine, src.header), str(mirrored_path))
+
+        proc = subprocess.run(
+            ["spineps", "sample", "-ignore_bids_filter", "-ignore_inference_compatibility",
+             "-i", str(mirrored_path), "-der_name", "derivatives_seg",
+             "-model_semantic", "t2w", "-model_instance", "instance",
+             "-model_labeling", "t2w_labeling"],
+            capture_output=True, text=True, timeout=cfg.timeout_spineps_s, env=env)
+
+        produced = [p for p in find_outputs(mirror_dir, "*spine_msk*.nii.gz", exclude_dirs=())
+                    if p != mirrored_path]
+        if not produced:
+            result["reason"] = clean_reason(proc.stderr or proc.stdout,
+                                           "mirrored run produced no semantic mask")
+            return result
+
+        mirrored_sem = np.asarray(load_canonical(produced[0]).get_fdata()).astype(np.int32)
+        # Undo the mirroring, then repair the side labels it swapped.
+        restored = mirror_side_labels(np.flip(mirrored_sem, axis=0))
+        original = np.asarray(load_canonical(semantic_mask).get_fdata()).astype(np.int32)
+        if restored.shape != original.shape:
+            result["reason"] = f"shape mismatch {restored.shape} vs {original.shape}"
+            return result
+
+        side_labels = (43, 44, 45, 46, 47, 48)
+        agreement = label_agreement(original, restored, side_labels)
+        result.update({
+            "tested": True,
+            "side_label_agreement": agreement,
+            "sides_stable": bool(agreement["min_dice"] is not None and agreement["min_dice"] >= 0.6),
+            "interpretation": (
+                "Dice per side-specific label between the normal run and the mirrored run. "
+                "Low values mean the left/right assignment is not stable on this volume, "
+                "so no left/right comparison in this run should be trusted."),
+        })
+    except Exception as exc:  # noqa: BLE001 — a failed self-check must not fail the stage
+        result["reason"] = f"{type(exc).__name__}: {exc}"[:200]
+    return result
 
 
 def _spineps_version() -> str | None:

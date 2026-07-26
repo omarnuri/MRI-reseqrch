@@ -18,6 +18,8 @@ DEFAULT_STAGES = (
     "spineps",        # vertebra instances + semantic subregions (posterior elements)
     "totalspineseg",  # cord, canal, discs
     "totalsegmentator",  # paraspinal muscles, ribs
+    "register",       # masks -> fat-suppressed series space (rigid, motion correction)
+    "crosscheck",     # independent vertebra model, per-level reliability (quality profile)
     "geometry",       # wedge angles, kyphosis proxy, lateral deviation
     "muscles",        # paraspinal CSA / volume asymmetry
     "marrow",         # robust intensity outlier screen inside vertebral bodies
@@ -56,6 +58,18 @@ class Config:
     timeout_spineps_s: int = 2400
     timeout_tss_s: int = 2400
     timeout_ts_s: int = 2400
+
+    quality: bool = False
+    """Spend GPU time on reliability rather than speed: enables the independent
+    cross-check model and mirror test-time augmentation. Worth it on an A100,
+    pointless on 4 GB. Does not change any measurement definition — only how much
+    we know about how reliable the masks are."""
+
+    tta_mirror: bool = False
+    """Run the segmenter a second time on a left-right mirrored copy, swap the
+    side-specific labels back, and report agreement. This is the direct test of
+    whether the model's LEFT/RIGHT assignment is stable — the one property the
+    facet question depends on. Requires `quality`."""
 
     # --- analysis parameters (all explicit, none buried in a cell) --------
     marrow_robust_z: float = 3.5

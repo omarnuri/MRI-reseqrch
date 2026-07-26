@@ -54,6 +54,13 @@ def run(ctx: Context) -> StageResult:
     img = load_canonical(fatsat)
     image = np.asarray(img.get_fdata(), dtype=float)
 
+    # Prefer masks that `register` already moved into this series' space with a
+    # motion-corrected transform; fall back to header-based resampling.
+    registered = ctx.masks_in_fatsat_space()
+    if registered:
+        instance_masks = [registered["instance_mask"]]
+        semantic_masks = [registered["semantic_mask"]] if registered.get("semantic_mask") else []
+
     inst_img = resample_mask_to(load_canonical(instance_masks[0]), img)
     inst = np.asarray(inst_img.get_fdata()).astype(np.int32)
 
@@ -120,6 +127,7 @@ def run(ctx: Context) -> StageResult:
         "plane": picks.get("FATSAT_PLANE"),
         "corpus_label_used": corpus_label,
         "restricted_to_vertebral_body": body_mask is not None,
+        "masks_motion_corrected": bool(registered and registered.get("applied")),
         "cohort_median_intensity": round(cohort_median, 3),
         "z_threshold": cfg.marrow_robust_z,
         "n_measured": len(measured),

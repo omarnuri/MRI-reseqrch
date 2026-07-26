@@ -305,6 +305,52 @@ def side_masks_from_labels(semantic: np.ndarray, left_labels, right_labels) -> t
     return left, right
 
 
+#: Semantic labels that swap meaning when the volume is mirrored left<->right.
+MIRROR_LABEL_PAIRS = ((43, 44), (45, 46), (47, 48), (63, 64))
+
+
+def mirror_side_labels(semantic: np.ndarray) -> np.ndarray:
+    """Swap left/right label ids (43<->44, 45<->46, 47<->48, 63<->64).
+
+    Needed for mirror test-time augmentation: run the segmenter on an L-R
+    flipped volume, flip the result back, and the anatomy lines up but every
+    side-specific label now names the wrong side. Swapping them makes the two
+    runs comparable — and their agreement is a direct check of whether the
+    model's *side* assignment is stable, which is the one thing this case
+    depends on.
+    """
+    out = np.asarray(semantic).copy()
+    for a, b in MIRROR_LABEL_PAIRS:
+        mask_a = semantic == a
+        mask_b = semantic == b
+        out[mask_a] = b
+        out[mask_b] = a
+    return out
+
+
+def label_agreement(a: np.ndarray, b: np.ndarray, labels) -> dict:
+    """Per-label Dice between two label volumes, plus the weakest label.
+
+    Used for mirror-TTA self-consistency and for cross-model checks. Labels
+    absent from both volumes are reported as None rather than 0, so "not present"
+    is not confused with "disagrees".
+    """
+    out: dict[str, float | None] = {}
+    for label in labels:
+        mask_a, mask_b = a == label, b == label
+        if not mask_a.any() and not mask_b.any():
+            out[str(int(label))] = None
+            continue
+        out[str(int(label))] = round(dice(mask_a, mask_b), 4)
+    scored = {k: v for k, v in out.items() if v is not None}
+    return {
+        "per_label_dice": out,
+        "mean_dice": round(float(np.mean(list(scored.values()))), 4) if scored else None,
+        "min_dice": round(float(min(scored.values())), 4) if scored else None,
+        "weakest_label": (min(scored, key=scored.get) if scored else None),
+    }
+
+
 def midline_index(reference_mask: np.ndarray) -> float:
     """Patient midline along the L-R axis, from a midline structure's centroid.
 

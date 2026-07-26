@@ -37,6 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--force", default=None,
                        help="comma-separated stages to re-run even if cached")
     run_p.add_argument("--no-gpu", action="store_true", help="allow running without a GPU")
+    run_p.add_argument("--quality", action="store_true",
+                       help="spend GPU time on reliability: independent cross-check model "
+                            "and mirror TTA (for an A100-class GPU)")
+    run_p.add_argument("--tta-mirror", action="store_true",
+                       help="with --quality: re-run segmentation mirrored to test whether the "
+                            "model's left/right assignment is stable")
 
     audit_p = sub.add_parser("audit", help="report identifying tags in a DICOM study")
     audit_p.add_argument("--dicom", required=True)
@@ -86,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
         stages=_stage_list(args.only, args.skip),
         force=tuple(s.strip() for s in (args.force or "").split(",") if s.strip()),
         gpu_required=not args.no_gpu,
+        quality=args.quality,
+        tta_mirror=args.tta_mirror,
     )
     results = run_pipeline(config)
     failed = [n for n, r in results.items() if r.status.value == "failed"]

@@ -250,6 +250,64 @@ class TestWithoutFatSuppression:
         assert "Этап не дал результата" in html
 
 
+class TestRegisteredMasks:
+    """When `register` has moved the masks, downstream stages must use those."""
+
+    def _seed_with_registration(self, tmp_path, *, applied: bool):
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, bright_side="right")
+        cfg.stages = ("posterior", "marrow")
+        # A register stage result pointing at the same masks (identity transform):
+        # the numbers must not change, but the provenance flag must.
+        spineps = json.loads((cfg.stage_dir / "spineps.json").read_text(encoding="utf-8"))["data"]
+        _write_stage(cfg, "register", {
+            "space": "fatsat",
+            "applied": applied,
+            "instance_mask": spineps["instance_masks"][0],
+            "semantic_mask": spineps["semantic_masks"][0],
+            "registration": {"translation_magnitude_mm": 1.2 if applied else 0.0,
+                             "rotation_deg": 0.4 if applied else 0.0,
+                             "reason": None if applied else "did not improve the metric"},
+        })
+        return cfg
+
+    def test_motion_correction_is_recorded_when_applied(self, tmp_path):
+        cfg = self._seed_with_registration(tmp_path, applied=True)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        assert results["posterior"].data["masks_motion_corrected"] is True
+        assert results["marrow"].data["masks_motion_corrected"] is True
+
+    def test_unapplied_registration_is_not_claimed_as_corrected(self, tmp_path):
+        cfg = self._seed_with_registration(tmp_path, applied=False)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        assert results["posterior"].data["masks_motion_corrected"] is False
+        assert any("header geometry" in x
+                   for x in results["posterior"].data["interpretation_limits"])
+
+    def test_without_registration_the_caveat_is_stated(self, tmp_path):
+        cfg = seed_study(tmp_path, fatsat=True, bright_side="right")
+        cfg.stages = ("posterior",)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        assert results["posterior"].data["masks_motion_corrected"] is False
+        assert any("no motion correction" in x
+                   for x in results["posterior"].data["interpretation_limits"])
+
+
+class TestQualityProfile:
+    def test_crosscheck_is_off_in_the_standard_profile(self, tmp_path):
+        cfg = seed_study(tmp_path, fatsat=True)
+        cfg.stages = ("crosscheck",)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        assert results["crosscheck"].status.value == "skipped"
+        assert "quality" in results["crosscheck"].reason
+
+    def test_register_skips_cleanly_without_simpleitk_or_fatsat(self, tmp_path):
+        cfg = seed_study(tmp_path, fatsat=False)
+        cfg.stages = ("register",)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        assert results["register"].status.value == "skipped"
+        assert "fat-suppressed" in results["register"].reason
+
+
 class TestCoverageGuard:
     def test_side_comparison_is_refused_when_one_side_is_out_of_field(self, tmp_path):
         # This is the coronal-STIR-on-a-sagittal-grid situation that produced the
