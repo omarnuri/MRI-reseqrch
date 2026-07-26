@@ -33,7 +33,15 @@ PLANE_CORONAL = "coronal"
 PLANE_AXIAL = "axial"
 PLANE_UNKNOWN = "unknown"
 
-_LOCALIZER_TOKENS = ("localizer", "localiser", "scout", "survey", "smartbrain", "loc_", "3pl")
+#: Vendor names for a positioning scan. "scano"/"scanogram"/"topogram" are the ones
+#: this study actually uses ("Scano_SAG"), and none of them contain the word
+#: "localizer" — a token list alone is never enough, hence the geometric rule below.
+_LOCALIZER_TOKENS = ("localizer", "localiser", "scout", "survey", "smartbrain", "loc_",
+                     "3pl", "scano", "scanogram", "topogram", "positioning")
+#: A positioning scan is thick and short. Real diagnostic series in the spine are
+#: <= 5 mm; a 10 mm slab with a handful of slices exists only to place the others.
+_LOCALIZER_MIN_THICKNESS_MM = 7.0
+_LOCALIZER_MAX_SLICES = 8
 #: Fat-suppression techniques. "fs" needs word boundaries; "stir"/"tirm"/"spair"
 #: are unambiguous. Dixon water-only images are fat-suppressed by construction.
 _FATSAT_PATTERNS = (
@@ -52,13 +60,28 @@ def _matches_any(text: str, patterns: Iterable[str]) -> bool:
     return any(re.search(p, text) for p in patterns)
 
 
-def is_localizer(meta: dict) -> bool:
-    """True for survey/localiser series, which are never analysis inputs."""
+def is_localizer(meta: dict, n_slices: int | None = None) -> bool:
+    """True for survey/localiser series, which are never analysis inputs.
+
+    Three independent signals, because any one of them misses real studies: the
+    vendor's name for the series, the DICOM ImageType, and the geometry (a thick,
+    short slab is a positioning scan whatever it is called).
+    """
     text = _norm(meta.get("SeriesDescription", "")) + " " + _norm(meta.get("ProtocolName", ""))
     if _matches_any(text, [rf"\b{re.escape(t)}\b" for t in _LOCALIZER_TOKENS]):
         return True
     image_type = " ".join(str(x).lower() for x in (meta.get("ImageType") or []))
-    return "localizer" in image_type or "survey" in image_type
+    if "localizer" in image_type or "survey" in image_type:
+        return True
+    thickness = meta.get("SliceThickness")
+    try:
+        thickness = float(thickness) if thickness not in (None, "") else None
+    except (TypeError, ValueError):
+        thickness = None
+    if (thickness is not None and thickness >= _LOCALIZER_MIN_THICKNESS_MM
+            and n_slices is not None and n_slices <= _LOCALIZER_MAX_SLICES):
+        return True
+    return False
 
 
 def has_fat_saturation(meta: dict) -> bool:
@@ -241,7 +264,7 @@ def describe_series(meta: dict, *, path: str, name: str, shape, voxel_mm, normal
         echo_time_ms=_ms(meta.get("EchoTime"), "te"),
         repetition_time_ms=_ms(meta.get("RepetitionTime"), "tr"),
         inversion_time_ms=_ms(meta.get("InversionTime"), "ti"),
-        localizer=is_localizer(meta),
+        localizer=is_localizer(meta, n_slices=n_slices),
         notes=notes,
     )
 

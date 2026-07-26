@@ -52,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
     deid_p.add_argument("--dicom", required=True)
     deid_p.add_argument("--out", required=True)
 
+    insp_p = sub.add_parser("inspect", help="list the series in a study (no GPU, no dcm2niix)")
+    insp_p.add_argument("--dicom", required=True, help="DICOM directory or .zip")
+    insp_p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+
     sub.add_parser("stages", help="list pipeline stages in order")
     return parser
 
@@ -76,6 +80,14 @@ def main(argv: list[str] | None = None) -> int:
         from .dicom_audit import audit
 
         print(json.dumps(audit(args.dicom, sample=args.sample), indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "inspect":
+        from .inspect_study import format_table, inspect
+
+        report = inspect(args.dicom)
+        print(json.dumps(report, indent=2, ensure_ascii=False) if args.json
+              else format_table(report))
         return 0
 
     if args.command == "deid":

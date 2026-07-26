@@ -83,6 +83,28 @@ class TestLocalizer:
         assert is_localizer({"ImageType": ["ORIGINAL", "PRIMARY", "LOCALIZER"]}) is True
         assert is_localizer({"SeriesDescription": "T2 sag"}) is False
 
+    def test_vendor_names_for_a_positioning_scan(self):
+        # From the real study: "Scano_SAG" is a scout and contains none of the usual
+        # words, so a token list alone would have let it into the analysis.
+        for desc in ("Scano_SAG", "scanogram", "topogram sag"):
+            assert is_localizer({"SeriesDescription": desc}) is True, desc
+
+    def test_thick_short_slab_is_a_localizer_whatever_it_is_called(self):
+        assert is_localizer({"SeriesDescription": "series 1", "SliceThickness": 10.0},
+                            n_slices=5) is True
+
+    def test_a_real_series_is_not_caught_by_the_geometric_rule(self):
+        # 4 mm x 23 slices (the coronal STIR) and 3.5 mm x 17 (the sagittal T2).
+        assert is_localizer({"SeriesDescription": "T2 COR STIR", "SliceThickness": 4.0},
+                            n_slices=23) is False
+        assert is_localizer({"SeriesDescription": "T2 SAG", "SliceThickness": 3.5},
+                            n_slices=17) is False
+
+    def test_thickness_alone_is_not_enough(self):
+        # A thick series with many slices is a legitimate acquisition choice.
+        assert is_localizer({"SeriesDescription": "T2 ax", "SliceThickness": 8.0},
+                            n_slices=40) is False
+
 
 def _series(**kw) -> Series:
     base = dict(path=kw.get("name", "x") + ".nii.gz", name=kw.get("name", "x"),
