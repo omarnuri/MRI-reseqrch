@@ -28,7 +28,10 @@ from pathlib import Path
 
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
+from ..runlog import event, get_logger, log_command
 from ..utils import clean_reason, find_outputs
+
+log = get_logger(__name__)
 
 
 def run(ctx: Context) -> StageResult:
@@ -61,10 +64,18 @@ def run(ctx: Context) -> StageResult:
         "-model_labeling", "t2w_labeling",
     ]
     env = dict(os.environ, SPINEPS_SEGMENTOR_MODELS=models_dir)
+    log.info("models dir: %s (%d entries)", models_dir,
+             len(list(Path(models_dir).glob('*'))) if Path(models_dir).exists() else 0)
+    log.info("input copy: %s", work_input)
+    import time as _time
+    _t0 = _time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=cfg.timeout_spineps_s, env=env)
+        log_command("spineps", cmd, proc, seconds=_time.time() - _t0)
     except subprocess.TimeoutExpired:
+        log.error("spineps timed out after %ss", cfg.timeout_spineps_s)
+        event("problem", stage="spineps", detail=f"timeout {cfg.timeout_spineps_s}s")
         return StageResult(name="spineps", status=Status.FAILED, evidence=Evidence.MODEL,
                            reason=f"timeout after {cfg.timeout_spineps_s}s")
 
@@ -78,8 +89,14 @@ def run(ctx: Context) -> StageResult:
     centroids = find_outputs(out_dir, "*ctd*.json", exclude_dirs=()) \
         + find_outputs(out_dir, "*snp*.json", exclude_dirs=())
 
+    log.info("outputs: %d instance, %d semantic, %d centroid files",
+             len(instance_masks), len(semantic_masks), len(centroids))
+    event("spineps_outputs", instance=len(instance_masks), semantic=len(semantic_masks),
+          centroids=len(centroids),
+          files=[str(p) for p in (instance_masks + semantic_masks)[:6]])
     if not instance_masks and not semantic_masks:
         reason = clean_reason(proc.stderr or proc.stdout, "no masks written")
+        log.error("spineps produced no masks (rc=%s): %s", proc.returncode, reason)
         return StageResult(name="spineps", status=Status.FAILED, evidence=Evidence.MODEL,
                            reason=f"rc={proc.returncode}: {reason}",
                            data={"stdout_tail": (proc.stdout or "")[-1500:],

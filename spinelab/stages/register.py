@@ -24,7 +24,10 @@ from pathlib import Path
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
 from ..registration import apply_to_label_volume, rigid_register
+from ..runlog import event, get_logger
 from ..utils import write_json
+
+log = get_logger(__name__)
 
 #: target name -> sequence pick key
 TARGETS = {"fatsat": "FATSAT_BEST", "axial": "T2_AX"}
@@ -60,7 +63,15 @@ def run(ctx: Context) -> StageResult:
 
     targets: dict[str, dict] = {}
     for name, fixed_image in sorted(wanted.items()):
+        log.info("registering masks onto %s target: %s", name, Path(fixed_image).name)
         transform, result = rigid_register(fixed_image, t2_sag)
+        log.info("  applied=%s translation=%.2f mm rotation=%.2f deg metric %s -> %s%s",
+                 result.applied, result.translation_magnitude_mm, result.rotation_deg,
+                 result.metric_before, result.metric_after,
+                 f" ({result.reason})" if result.reason else "")
+        event("registration", target=name, **result.to_dict())
+        if not result.applied:
+            event("problem", stage="register", detail=f"{name}: {result.reason}")
         entry = {
             "image": fixed_image,
             "plane": picks.get("FATSAT_PLANE") if name == "fatsat" else "axial",

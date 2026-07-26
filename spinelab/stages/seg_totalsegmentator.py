@@ -27,7 +27,10 @@ from pathlib import Path
 
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
+from ..runlog import event, get_logger, log_command
 from ..utils import clean_reason
+
+log = get_logger(__name__)
 
 #: TotalSegmentator MR tasks used by `task="total_mr"` (part1 organs, part2 muscles).
 MR_TASK_IDS = (850, 851)
@@ -55,7 +58,10 @@ def run(ctx: Context) -> StageResult:
     env["TOTALSEG_HOME_DIR"] = str(home)
     env["nnUNet_results"] = str(results)
 
+    log.info("weights dir: %s", results)
     weights = _ensure_weights(results, env)
+    log.info("weights per task: %s", weights)
+    event("ts_weights", weights=weights, dir=str(results))
     missing = [tid for tid, ok in weights.items() if not ok]
     if missing:
         return StageResult(
@@ -69,10 +75,16 @@ def run(ctx: Context) -> StageResult:
         f"totalsegmentator(input={str(t2_sag)!r}, output={str(out_dir)!r}, "
         "task='total_mr', ml=False, verbose=False)\n"
     )
+    import time as _time
+    _t0 = _time.time()
     try:
         proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
                               text=True, timeout=cfg.timeout_ts_s, env=env)
+        log_command("totalsegmentator", ["python", "-c", "totalsegmentator(task=total_mr)"],
+                    proc, seconds=_time.time() - _t0)
     except subprocess.TimeoutExpired:
+        log.error("totalsegmentator timed out after %ss", cfg.timeout_ts_s)
+        event("problem", stage="totalsegmentator", detail=f"timeout {cfg.timeout_ts_s}s")
         return StageResult(name="totalsegmentator", status=Status.FAILED,
                            evidence=Evidence.MODEL,
                            reason=f"timeout after {cfg.timeout_ts_s}s")
@@ -85,6 +97,7 @@ def run(ctx: Context) -> StageResult:
             data={"stderr_tail": (proc.stderr or "")[-1500:]},
         )
 
+    log.info("outputs: %d masks in %s", len(outputs), out_dir)
     muscle_pairs = {}
     for base in MUSCLE_BASES:
         left = next((p for p in outputs if f"{base}_left" in p.name.lower()), None)
@@ -92,6 +105,8 @@ def run(ctx: Context) -> StageResult:
         if left and right:
             muscle_pairs[base] = {"left": str(left), "right": str(right)}
 
+    log.info("muscle pairs found: %s", sorted(muscle_pairs))
+    event("ts_outputs", n_masks=len(outputs), muscle_pairs=sorted(muscle_pairs))
     status = Status.OK if muscle_pairs else Status.PARTIAL
     return StageResult(
         name="totalsegmentator", status=status, evidence=Evidence.MODEL,

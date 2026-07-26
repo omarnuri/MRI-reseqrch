@@ -498,6 +498,86 @@ class TestFatSuppressionGate:
                    for x in results["marrow"].data["interpretation_limits"])
 
 
+class TestRunLogging:
+    """Diagnosis at a distance: a run must leave enough behind to be debugged."""
+
+    def test_log_and_event_stream_are_written(self, tmp_path):
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, axial=True)
+        cfg.stages = ("geometry", "marrow", "report")
+        run_pipeline(cfg, log=lambda *_: None)
+        log_text = (cfg.results_dir / "run.log").read_text(encoding="utf-8")
+        assert "stage geometry: start" in log_text or "stage geometry" in log_text
+        assert (cfg.results_dir / "run.jsonl").exists()
+
+    def test_events_are_valid_jsonl_with_stage_boundaries(self, tmp_path):
+        from spinelab.runlog import read_events
+
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18)
+        cfg.stages = ("geometry", "report")
+        run_pipeline(cfg, log=lambda *_: None)
+        events = read_events(cfg.results_dir)
+        kinds = [e["kind"] for e in events]
+        assert "run_start" in kinds and "run_end" in kinds
+        assert "environment" in kinds
+        starts = {e["stage"] for e in events if e["kind"] == "stage_start"}
+        ends = {e["stage"] for e in events if e["kind"] == "stage_end"}
+        assert starts == ends == {"geometry", "report"}
+        assert all("ts" in e for e in events)
+
+    def test_environment_snapshot_records_versions(self, tmp_path):
+        from spinelab.runlog import read_events
+
+        cfg = seed_study(tmp_path, fatsat=True)
+        cfg.stages = ("report",)
+        run_pipeline(cfg, log=lambda *_: None)
+        env = next(e for e in read_events(cfg.results_dir) if e["kind"] == "environment")
+        assert env["numpy"] and env["nibabel"]
+        assert "gpu" in env and "env" in env
+
+    def test_study_limitations_are_recorded_as_problems(self, tmp_path):
+        from spinelab.runlog import read_events
+
+        cfg = seed_study(tmp_path, fatsat=False)   # no fat-suppressed series
+        cfg.stages = ("marrow", "report")
+        run_pipeline(cfg, log=lambda *_: None)
+        problems = [e for e in read_events(cfg.results_dir) if e["kind"] == "problem"]
+        # ingest was pre-seeded here, so the marrow skip is what must be visible
+        skipped = [e for e in read_events(cfg.results_dir)
+                   if e["kind"] == "stage_end" and e["status"] == "skipped"]
+        assert skipped or problems
+
+    def test_digest_is_paste_sized_and_names_the_stages(self, tmp_path):
+        from spinelab.runlog import digest
+
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, axial=True)
+        cfg.stages = ("geometry", "facets_axial", "marrow", "report")
+        run_pipeline(cfg, log=lambda *_: None)
+        text = digest(cfg.work_dir)
+        assert "spinelab run digest" in text
+        for stage in ("geometry", "facets_axial", "marrow", "report"):
+            assert stage in text
+        assert len(text) < 20000
+
+    def test_digest_shows_an_aborted_run_first(self, tmp_path):
+        from spinelab.runlog import digest
+
+        cfg = Config(work_dir=tmp_path / "empty", dicom_source=str(tmp_path / "nope.zip"))
+        run_pipeline(cfg, log=lambda *_: None)
+        text = digest(cfg.work_dir)
+        assert "ABORTED" in text
+
+    def test_key_numbers_render_without_a_full_run(self, tmp_path):
+        from spinelab.cli import _key_numbers
+
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, axial=True)
+        cfg.stages = ("geometry", "facets_axial", "report")
+        run_pipeline(cfg, log=lambda *_: None)
+        text = _key_numbers(cfg.work_dir)
+        assert "key numbers" in text
+        assert "max wedge angle" in text
+        assert "cord dice" in text
+
+
 class TestReportNumbering:
     def test_sections_are_numbered_once_and_in_order(self, tmp_path):
         import re

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import __version__
+from . import __version__, runlog
 from .config import Config
 from .evidence import Evidence, Status
 from .utils import human_duration, read_json, write_json
@@ -160,6 +160,18 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
         "started": time.strftime("%Y-%m-%d %H:%M:%S"),
     })
 
+    log_path = runlog.setup(config.results_dir)
+    logger = runlog.get_logger()
+    logger.info("run started: stages=%s force=%s", list(config.stages), list(config.force))
+    logger.info("dicom_source=%r work_dir=%s cache_dir=%s", config.dicom_source,
+                config.work_dir, config.cache_dir)
+    runlog.event("run_start", stages=list(config.stages), force=list(config.force),
+                 dicom_source=config.dicom_source, work_dir=str(config.work_dir),
+                 cache_dir=str(config.cache_dir) if config.cache_dir else None,
+                 quality=config.quality, tta_mirror=config.tta_mirror)
+    runlog.log_environment({"spinelab_version": __version__})
+    log(f"log: {log_path}")
+
     registry = _registry()
     ctx = Context(config=config)
     unknown = [s for s in config.stages if s not in registry]
@@ -194,21 +206,35 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
                 continue
 
         log(f"[{name:17s}] running…")
+        logger.info("=== stage %s: start ===", name)
+        runlog.event("stage_start", stage=name)
         t0 = time.time()
         try:
             result = registry[name](ctx)
         except SkipStage as exc:
             result = StageResult(name=name, status=Status.SKIPPED, reason=str(exc))
+            logger.info("stage %s skipped: %s", name, exc)
         except Exception as exc:  # noqa: BLE001 — a broken stage must not kill the run
+            tb = traceback.format_exc()
             result = StageResult(
                 name=name,
                 status=Status.FAILED,
                 reason=f"{type(exc).__name__}: {exc}"[:400],
-                data={"traceback": traceback.format_exc()[-2000:]},
+                data={"traceback": tb[-2000:]},
             )
+            logger.error("stage %s FAILED: %s\n%s", name, exc, tb)
+            runlog.event("stage_failed", stage=name, error=f"{type(exc).__name__}: {exc}",
+                         traceback=tb[-2000:])
         result.duration_s = time.time() - t0
         ctx.results[name] = result
         write_json(marker, result.to_dict())
+        logger.info("=== stage %s: %s in %s%s ===", name, result.status.value,
+                    human_duration(result.duration_s),
+                    f" — {result.reason}" if result.reason else "")
+        runlog.event("stage_end", stage=name, status=result.status.value,
+                     evidence=result.evidence.value, seconds=round(result.duration_s, 2),
+                     reason=result.reason, artifacts=len(result.artifacts),
+                     data_keys=sorted(result.data)[:25])
 
         icon = {"ok": "OK", "partial": "PARTIAL", "skipped": "SKIP",
                 "failed": "FAIL", "cached": "CACHED"}[result.status.value]
@@ -217,6 +243,10 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
 
         if name == "ingest" and not (result.ok and result.data.get("picks")):
             aborted = result.reason or "the study could not be read"
+            logger.error("RUN ABORTED — no study data: %s (dicom_source=%r)",
+                         aborted, config.dicom_source)
+            runlog.event("run_aborted", stage=name, reason=aborted,
+                         dicom_source=config.dicom_source)
             log("")
             log("=" * 70)
             log("RUN ABORTED — no study data was read, so nothing below could run.")
@@ -228,7 +258,12 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
 
     summary = summarise(ctx)
     summary["aborted"] = aborted
+    summary["log"] = str(log_path)
     write_json(config.results_dir / "summary.json", summary)
+    logger.info("run finished: %d failed, %d skipped%s", summary["n_failed"],
+                len(summary["skipped"]), " (ABORTED)" if aborted else "")
+    runlog.event("run_end", failed=summary["failed"], skipped=summary["skipped"],
+                 aborted=aborted)
     return ctx.results
 
 

@@ -56,8 +56,71 @@ def build_parser() -> argparse.ArgumentParser:
     insp_p.add_argument("--dicom", required=True, help="DICOM directory or .zip")
     insp_p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
 
+    diag_p = sub.add_parser("diagnose", help="paste-sized digest of the last run")
+    diag_p.add_argument("--work", default="/content/spine_work", help="workspace directory")
+    diag_p.add_argument("--log-tail", type=int, default=40,
+                       help="how many trailing log lines to include (0 for none)")
+    diag_p.add_argument("--numbers", action="store_true",
+                       help="also print the key measurements from findings.json")
+
     sub.add_parser("stages", help="list pipeline stages in order")
     return parser
+
+
+def _key_numbers(work: Path) -> str:
+    """The measurements worth comparing between runs, flattened for pasting."""
+    findings = json.loads((Path(work) / "results" / "findings.json").read_text(encoding="utf-8"))
+    data = {k: (v.get("data") or {}) for k, v in findings.get("stages", {}).items()}
+    lines = ["", "=== key numbers ==="]
+
+    def add(label: str, value):
+        lines.append(f"{label:34s} {value}")
+
+    ingest = data.get("ingest", {})
+    for series in ingest.get("series", []):
+        if not series.get("localizer"):
+            add(f"series {series.get('description','?')[:22]}",
+                f"{series.get('sequence_label')} {series.get('plane')} "
+                f"{series.get('n_slices')} slices")
+    qc = data.get("fatsat_qc", {})
+    add("fat suppression effective", qc.get("suppression_effective"))
+    for name, target in (data.get("register", {}).get("targets") or {}).items():
+        reg = target.get("registration", {})
+        add(f"register {name}", f"applied={target.get('applied')} "
+                                f"{reg.get('translation_magnitude_mm')} mm / "
+                                f"{reg.get('rotation_deg')} deg")
+    mirror = (data.get("spineps", {}).get("mirror_consistency") or {})
+    add("mirror TTA min dice", (mirror.get("side_label_agreement") or {}).get("min_dice"))
+    add("crosscheck mean dice", data.get("crosscheck", {}).get("mean_dice"))
+    add("crosscheck weak levels", data.get("crosscheck", {}).get("levels_needing_visual_check"))
+    geom = data.get("geometry", {})
+    add("levels measured", geom.get("levels_measured"))
+    add("max wedge angle", geom.get("max_wedge_angle_deg"))
+    add("scheuermann pattern", geom.get("scheuermann_pattern"))
+    for v in geom.get("per_vertebra", []):
+        add(f"  wedge {v.get('name')}", f"{v.get('wedge_angle_deg')} deg "
+                                        f"(ant {v.get('anterior_height_mm')} / "
+                                        f"post {v.get('posterior_height_mm')} mm)")
+    for joint in data.get("facets_axial", {}).get("joints", []):
+        sides = joint.get("sides", {})
+        add(f"  facet {joint.get('joint')}",
+            f"L {(sides.get('left') or {}).get('bright_fraction')} / "
+            f"R {(sides.get('right') or {}).get('bright_fraction')} "
+            f"comparable={joint.get('comparable')}")
+    for group, entry in (data.get("posterior", {}).get("groups") or {}).items():
+        cmp_ = entry.get("bright_fraction_comparison") or {}
+        add(f"posterior {group}", f"{entry.get('status')} ratio={cmp_.get('ratio')} "
+                                  f"higher={cmp_.get('higher_side')}")
+    add("marrow candidates", data.get("marrow", {}).get("top_candidates"))
+    for muscle, m in (data.get("muscles", {}).get("muscles") or {}).items():
+        add(f"muscle {muscle}", (m.get("comparison") or {}).get("diff_pct"))
+    canal = data.get("canal", {})
+    add("canal median / p10 / min mm2", f"{canal.get('median_area_mm2')} / "
+                                        f"{canal.get('p10_area_mm2')} / "
+                                        f"{canal.get('min_area_mm2')}")
+    add("canal max narrowing %", canal.get("max_narrowing_pct"))
+    add("cord dice (spineps vs tss)", data.get("agreement", {}).get("dice"))
+    return "\n".join(lines)
 
 
 def _stage_list(only: str | None, skip: str | None) -> tuple[str, ...]:
@@ -80,6 +143,17 @@ def main(argv: list[str] | None = None) -> int:
         from .dicom_audit import audit
 
         print(json.dumps(audit(args.dicom, sample=args.sample), indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "diagnose":
+        from .runlog import digest
+
+        print(digest(args.work, log_tail=args.log_tail))
+        if args.numbers:
+            try:
+                print(_key_numbers(Path(args.work)))
+            except Exception as exc:  # noqa: BLE001
+                print(f"\n(no findings.json to read: {exc})")
         return 0
 
     if args.command == "inspect":

@@ -10,8 +10,11 @@ from pathlib import Path
 from ..dicom_audit import audit
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
+from ..runlog import event, get_logger, log_command
 from ..sequences import build_picks, describe_series
 from ..utils import clean_reason, read_json, write_json
+
+log = get_logger(__name__)
 
 
 def _extract_zip(zip_path: Path, target: Path) -> dict:
@@ -36,6 +39,8 @@ def _extract_zip(zip_path: Path, target: Path) -> dict:
 
 
 def _run_dcm2niix(dicom_dir: Path, nifti_dir: Path) -> tuple[int, str, str]:
+    import time
+
     nifti_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         "dcm2niix",
@@ -46,7 +51,10 @@ def _run_dcm2niix(dicom_dir: Path, nifti_dir: Path) -> tuple[int, str, str]:
         "-o", str(nifti_dir),
         str(dicom_dir),
     ]
+    log.info("converting DICOM -> NIfTI: %s", dicom_dir)
+    t0 = time.time()
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    log_command("ingest", cmd, proc, seconds=time.time() - t0)
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
@@ -76,8 +84,12 @@ def _fetch_url(url: str, dest_dir: Path) -> Path:
 def run(ctx: Context) -> StageResult:
     cfg = ctx.config
     raw_source = cfg.dicom_source or ""
+    log.info("dicom_source=%r", raw_source)
     if raw_source.startswith(("http://", "https://")):
+        log.info("source is a URL — downloading into the workspace")
         source = _fetch_url(raw_source, cfg.data_dir / "download")
+        log.info("downloaded %s (%.1f MB)", source.name, source.stat().st_size / 1e6)
+        event("source_downloaded", path=str(source), bytes=source.stat().st_size)
     else:
         source = Path(raw_source) if raw_source else None
     if source is None or not source.exists():
@@ -86,6 +98,8 @@ def run(ctx: Context) -> StageResult:
     extract_info: dict = {}
     if source.is_file() and source.suffix.lower() == ".zip":
         extract_info = _extract_zip(source, cfg.dicom_dir)
+        log.info("archive: %s", extract_info)
+        event("archive_extracted", **extract_info)
         dicom_root = cfg.dicom_dir
     elif source.is_dir():
         dicom_root = source
@@ -94,12 +108,17 @@ def run(ctx: Context) -> StageResult:
 
     phi = audit(dicom_root)
     write_json(cfg.results_dir / "phi_audit.json", phi)
+    log.info("PHI audit: %s (%d files sampled, tags: %s)", phi["verdict"],
+             phi["files_sampled"], ", ".join(phi["phi_tags_present"]) or "none")
+    event("phi_audit", verdict=phi["verdict"], files_sampled=phi["files_sampled"],
+          tags=phi["phi_tags_present"])
 
     if shutil.which("dcm2niix") is None:
         raise SkipStage("dcm2niix is not installed (apt-get install -y dcm2niix)")
 
     existing = sorted(cfg.nifti_dir.glob("*.nii*"))
     if existing:
+        log.info("reusing %d existing NIfTI volumes in %s", len(existing), cfg.nifti_dir)
         rc, out, err = 0, f"reusing {len(existing)} existing NIfTI volumes", ""
     else:
         rc, out, err = _run_dcm2niix(dicom_root, cfg.nifti_dir)
@@ -126,7 +145,20 @@ def run(ctx: Context) -> StageResult:
             normal=img["slice_normal"],
         ))
 
+    for s in series:
+        log.info("series: %-28s %-14s %-9s %3d slices %s",
+                 (s.description or s.name)[:28], s.sequence_label, s.plane, s.n_slices,
+                 "[localizer]" if s.localizer else "")
     picks = build_picks(series, min_slices=cfg.min_series_slices)
+    log.info("picks: %s", {k: (Path(v).name if isinstance(v, str) and v.endswith(".gz") else v)
+                           for k, v in picks.items() if k != "limitations"})
+    for limitation in picks.get("limitations", []):
+        log.warning("study limitation: %s", limitation)
+        event("problem", stage="ingest", detail=limitation)
+    event("series_inventory", n_series=len(series),
+          series=[[s.description, s.sequence_label, s.plane, s.n_slices, s.localizer]
+                  for s in series],
+          picks={k: v for k, v in picks.items() if k != "limitations"})
     inventory = [s.to_dict() for s in series]
     write_json(cfg.intermediate_dir / "sequence_inventory.json", inventory)
     write_json(cfg.intermediate_dir / "sequence_picks.json", picks)
