@@ -19,7 +19,6 @@ volume, which mixes two grids and produces a wrong number in cm^3.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import numpy as np
 

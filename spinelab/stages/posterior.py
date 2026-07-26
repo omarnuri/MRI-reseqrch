@@ -59,12 +59,17 @@ def run(ctx: Context) -> StageResult:
         raise SkipStage("no image to measure signal on")
 
     fat_suppressed = bool(fatsat)
-    evidence = Evidence.HEURISTIC if fat_suppressed else Evidence.NOT_DIAGNOSTIC
+    qc = ctx.stage_data("fatsat_qc")
+    suppression_ok = qc.get("suppression_effective") if qc else None
+    # A series that claims fat suppression but does not show it is no better than a
+    # plain T2 for this purpose, so it is treated the same way.
+    evidence = (Evidence.HEURISTIC if (fat_suppressed and suppression_ok is not False)
+                else Evidence.NOT_DIAGNOSTIC)
 
     # Masks moved by `register` are motion-corrected onto this exact series; at
     # facet scale (2-4 mm) that correction decides whether the region of interest
     # sits on the joint at all.
-    registered = ctx.masks_in_fatsat_space() if fat_suppressed else None
+    registered = ctx.masks_in_space("fatsat") if fat_suppressed else None
     if registered and registered.get("semantic_mask"):
         semantic_masks = [registered["semantic_mask"]]
         instance_masks = [registered["instance_mask"]] if registered.get("instance_mask") else []
@@ -82,25 +87,7 @@ def run(ctx: Context) -> StageResult:
     groups_out: dict[str, dict] = {}
     warnings: list[str] = []
 
-    # The bright-signal threshold comes from vertebral marrow — a tissue that is
-    # not under test — so it cannot be dragged along by the very asymmetry being
-    # measured. On a fat-suppressed sequence normal marrow is dark, and peri-facet
-    # fluid or oedema is what rises above it.
-    corpus_label = L.resolve_corpus_label(sem)
-    reference_name = None
-    threshold = None
-    if corpus_label is not None:
-        threshold = robust_threshold(image[sem == corpus_label], k=cfg.posterior_reference_k)
-        reference_name = f"vertebral marrow (semantic label {corpus_label})"
-    if threshold is None:
-        posterior_all = np.isin(sem, list(L.POSTERIOR_MIDLINE))
-        if posterior_all.any():
-            threshold = robust_threshold(image[posterior_all], k=cfg.posterior_reference_k)
-            reference_name = "midline posterior elements (arch/spinous process)"
-    fallback_percentile = threshold is None
-    if fallback_percentile:
-        reference_name = (f"{cfg.posterior_bright_percentile:.0f}th percentile inside the "
-                          "region itself (no reference tissue available — weaker)")
+    threshold, reference_name, fallback_percentile = _resolve_threshold(cfg, image, sem)
 
     for group, (left_labels, right_labels) in GROUPS.items():
         if not (set(left_labels) & present) and not (set(right_labels) & present):
@@ -116,23 +103,14 @@ def run(ctx: Context) -> StageResult:
 
         # One threshold for both sides so they are measured against the same
         # yardstick; from reference tissue where available.
-        pooled = left | right
         group_threshold = threshold
         if group_threshold is None:
-            group_threshold = bright_fraction(image, pooled,
+            group_threshold = bright_fraction(image, left | right,
                                              cfg.posterior_bright_percentile)["threshold"]
-        side_stats = {}
-        for side_name, mask, cov in (("left", left, cov_l), ("right", right, cov_r)):
-            values = image[mask.astype(bool)]
-            inside = values[values > 0]
-            n_bright = int((values > group_threshold).sum()) if group_threshold else 0
-            side_stats[side_name] = {
-                "region_voxels": int(mask.sum()),
-                "in_fov_coverage": round(cov, 3),
-                "median_intensity": round(float(np.median(inside)), 3) if inside.size else None,
-                "bright_voxels": n_bright,
-                "bright_fraction": round(n_bright / max(int(mask.sum()), 1), 5),
-            }
+        side_stats = {
+            "left": _side_stats(image, left, cov_l, group_threshold),
+            "right": _side_stats(image, right, cov_r, group_threshold),
+        }
 
         entry = {
             "status": "measured" if comparable else "not_comparable",
@@ -163,6 +141,11 @@ def run(ctx: Context) -> StageResult:
         "Signal intensity in MR has no absolute units: only the two sides of the same "
         "image are compared, never one study against another.",
     ]
+    if suppression_ok is False:
+        limits.insert(0,
+            "FAT SUPPRESSION NOT CONFIRMED on this series (" + str(qc.get("verdict")) + "). "
+            "Bright signal is therefore not distinguishable from fat, and nothing below "
+            "supports a conclusion about oedema or effusion.")
     if not fat_suppressed:
         limits.insert(0,
             "NO fat-suppressed sequence was available, so this measurement was made on "
@@ -206,6 +189,44 @@ def run(ctx: Context) -> StageResult:
                            reason="no side comparison was admissible; see warnings",
                            data=payload)
     return StageResult(name="posterior", status=Status.OK, evidence=evidence, data=payload)
+
+
+def _resolve_threshold(cfg, image: np.ndarray, sem: np.ndarray) -> tuple[float | None, str, bool]:
+    """Bright-signal threshold, from tissue that is not the tissue under test.
+
+    On a fat-suppressed sequence normal marrow is dark and peri-facet fluid is what
+    rises above it, so marrow is the natural reference. Falling back to a
+    percentile of the measured region itself is markedly weaker — it saturates
+    when one side is uniformly bright — so that case is labelled as such.
+    """
+    corpus_label = L.resolve_corpus_label(sem)
+    if corpus_label is not None:
+        threshold = robust_threshold(image[sem == corpus_label], k=cfg.posterior_reference_k)
+        if threshold is not None:
+            return threshold, f"vertebral marrow (semantic label {corpus_label})", False
+
+    midline = np.isin(sem, list(L.POSTERIOR_MIDLINE))
+    if midline.any():
+        threshold = robust_threshold(image[midline], k=cfg.posterior_reference_k)
+        if threshold is not None:
+            return threshold, "midline posterior elements (arch/spinous process)", False
+
+    return None, (f"{cfg.posterior_bright_percentile:.0f}th percentile inside the region "
+                  "itself (no reference tissue available — weaker)"), True
+
+
+def _side_stats(image: np.ndarray, mask: np.ndarray, coverage: float,
+                threshold: float | None) -> dict:
+    values = image[mask.astype(bool)]
+    inside = values[values > 0]
+    n_bright = int((values > threshold).sum()) if threshold else 0
+    return {
+        "region_voxels": int(mask.sum()),
+        "in_fov_coverage": round(coverage, 3),
+        "median_intensity": round(float(np.median(inside)), 3) if inside.size else None,
+        "bright_voxels": n_bright,
+        "bright_fraction": round(n_bright / max(int(mask.sum()), 1), 5),
+    }
 
 
 def _coverage(image: np.ndarray, mask: np.ndarray) -> float:

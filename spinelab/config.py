@@ -18,8 +18,10 @@ DEFAULT_STAGES = (
     "spineps",        # vertebra instances + semantic subregions (posterior elements)
     "totalspineseg",  # cord, canal, discs
     "totalsegmentator",  # paraspinal muscles, ribs
-    "register",       # masks -> fat-suppressed series space (rigid, motion correction)
+    "register",       # masks -> fat-suppressed and axial series (rigid motion correction)
+    "fatsat_qc",      # did the fat suppression actually work? gates the oedema branch
     "crosscheck",     # independent vertebra model, per-level reliability (quality profile)
+    "facets_axial",   # per-joint, per-side facet measurement on the axial T2
     "geometry",       # wedge angles, kyphosis proxy, lateral deviation
     "muscles",        # paraspinal CSA / volume asymmetry
     "marrow",         # robust intensity outlier screen inside vertebral bodies
@@ -81,6 +83,9 @@ class Config:
     posterior_bright_percentile: float = 95.0
     """Fallback only, used when no reference tissue is available. Never a
     whole-volume percentile: that highlights CSF and subcutaneous fat."""
+    facet_dilate_voxels: int = 2
+    """How far each articular process is grown before intersecting the two to form
+    the joint-interface ROI. 2 voxels on a 0.49 mm axial grid is about 1 mm."""
     muscle_asymmetry_pct_threshold: float = 10.0
     wedge_scheuermann_deg: float = 5.0
     wedge_scheuermann_run: int = 3

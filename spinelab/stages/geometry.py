@@ -113,18 +113,27 @@ def run(ctx: Context) -> StageResult:
     wedges = [r.get("wedge_angle_deg") for r in per_vertebra]
     run_len = longest_run(wedges, lambda w: w is not None and w >= cfg.wedge_scheuermann_deg)
 
-    centroids: dict[int, np.ndarray] = {}
+    # Centroids are computed from the canonical instance mask, not read from the
+    # SPINEPS centroid JSON. That file stores coordinates in the *original* image's
+    # own axis order together with a direction code; consuming its X/Y/Z as if they
+    # were canonical millimetres silently mixes coordinate conventions, and the
+    # curvature numbers that come out of it look plausible either way. The JSON is
+    # loaded only as a cross-check on how many levels were found.
+    centroids = _centroids_from_mask(inst, zooms)
+    notes.append("centroids computed from the canonical instance mask "
+                 "(the SPINEPS centroid file uses the original image's axis order)")
     for path in spineps.get("centroid_files", []):
         try:
             with open(path, encoding="utf-8") as fh:
-                centroids = parse_centroids(json.load(fh))
+                declared = parse_centroids(json.load(fh))
         except Exception:
             continue
-        if centroids:
+        if declared:
+            missing = sorted(set(centroids) - set(declared))
+            if missing:
+                notes.append("SPINEPS centroid file lists fewer levels than the mask: "
+                             f"missing {[L.vertebra_name(m) for m in missing]}")
             break
-    if not centroids:
-        centroids = _centroids_from_mask(inst, zooms)
-        notes.append("centroids computed from the instance mask (no SPINEPS centroid file)")
 
     curvature = curvature_metrics(centroids, L.THORACIC_LABELS)
     scheuermann = run_len >= cfg.wedge_scheuermann_run

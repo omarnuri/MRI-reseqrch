@@ -290,6 +290,27 @@ def asymmetry_ratio(left: float, right: float) -> dict:
 # --------------------------------------------------------------------------
 
 
+def facet_interface(semantic: np.ndarray, instance: np.ndarray, *, upper_label: int,
+                    lower_label: int, inferior_process: int, superior_process: int,
+                    dilate: int = 2) -> np.ndarray:
+    """The region between the two bones that form one facet joint, on one side.
+
+    A zygapophyseal joint at level N/N+1 is formed by the **inferior** articular
+    process of the vertebra above and the **superior** articular process of the
+    vertebra below. Dilating each and intersecting gives the interface between
+    them — the joint space plus its immediate margins.
+
+    That is the ROI worth measuring: the old code pooled every posterior-element
+    label of every vertebra into one blob, which contains mostly bone and cannot
+    show a joint effusion even in principle.
+    """
+    upper = (instance == upper_label) & (semantic == inferior_process)
+    lower = (instance == lower_label) & (semantic == superior_process)
+    if not upper.any() or not lower.any():
+        return np.zeros_like(upper, dtype=bool)
+    return binary_dilate(upper, dilate) & binary_dilate(lower, dilate)
+
+
 def side_masks_from_labels(semantic: np.ndarray, left_labels, right_labels) -> tuple[np.ndarray, np.ndarray]:
     """Left/right masks taken from the segmentation's own side labels.
 
@@ -303,6 +324,114 @@ def side_masks_from_labels(semantic: np.ndarray, left_labels, right_labels) -> t
     left = np.isin(semantic, list(left_labels))
     right = np.isin(semantic, list(right_labels))
     return left, right
+
+
+# --------------------------------------------------------------------------
+# Morphology helpers (numpy only — scipy is deliberately not a dependency)
+# --------------------------------------------------------------------------
+
+
+def _shift(mask: np.ndarray, axis: int, offset: int, fill: bool = False) -> np.ndarray:
+    """Shift a boolean array along one axis, filling the vacated edge.
+
+    Written with slices rather than np.roll: roll wraps around, which for
+    morphology means the top of the volume grows into the bottom.
+    """
+    out = np.full_like(mask, fill, dtype=bool)
+    n = mask.shape[axis]
+    if abs(offset) >= n:
+        return out
+    dst = [slice(None)] * mask.ndim
+    src = [slice(None)] * mask.ndim
+    if offset > 0:
+        dst[axis] = slice(offset, n)
+        src[axis] = slice(0, n - offset)
+    elif offset < 0:
+        dst[axis] = slice(0, n + offset)
+        src[axis] = slice(-offset, n)
+    else:
+        return mask.astype(bool).copy()
+    out[tuple(dst)] = mask[tuple(src)]
+    return out
+
+
+def binary_dilate(mask: np.ndarray, iterations: int = 1) -> np.ndarray:
+    """6-connected binary dilation.
+
+    scipy.ndimage would do this, but scipy has no wheel that installs reliably on
+    the operator's connection, and this is the only morphology the pipeline needs.
+    """
+    out = mask.astype(bool)
+    for _ in range(max(0, int(iterations))):
+        grown = out.copy()
+        for axis in range(out.ndim):
+            grown |= _shift(out, axis, 1, fill=False)
+            grown |= _shift(out, axis, -1, fill=False)
+        out = grown
+    return out
+
+
+def binary_erode(mask: np.ndarray, iterations: int = 1) -> np.ndarray:
+    """6-connected binary erosion.
+
+    Voxels outside the volume count as foreground, so eroding does not eat the
+    volume's own faces — otherwise a body that touches the edge of the field of
+    view would lose its rim to the border rather than to anatomy.
+    """
+    out = mask.astype(bool)
+    for _ in range(max(0, int(iterations))):
+        shrunk = out.copy()
+        for axis in range(out.ndim):
+            shrunk &= _shift(out, axis, 1, fill=True)
+            shrunk &= _shift(out, axis, -1, fill=True)
+        out = shrunk
+    return out
+
+
+def rim_to_core_ratio(image: np.ndarray, *, rim_iterations: int = 3,
+                      core_iterations: int = 12, body_threshold_percentile: float = 99.0,
+                      body_fraction: float = 0.10) -> dict | None:
+    """Signal of the subcutaneous band relative to the body core.
+
+    A fat-suppression check that needs no extra sequence and no segmentation:
+    subcutaneous fat forms a band just inside the skin. On a sequence that
+    suppresses fat that band is dark relative to the deep soft tissue; on a plain
+    T2 it is much brighter. Running this on both series of the same study and
+    comparing the two ratios says whether the fat suppression actually worked —
+    which decides whether any oedema reading is meaningful at all.
+
+    Returns None when the volume is too small or no body could be found.
+    """
+    image = np.asarray(image, dtype=float)
+    if image.ndim != 3 or image.size < 1000:
+        return None
+    positive = image[image > 0]
+    if positive.size < 100:
+        return None
+    reference = float(np.percentile(positive, body_threshold_percentile))
+    body = image > (body_fraction * reference)
+    if body.sum() < 500:
+        return None
+    core = binary_erode(body, core_iterations)
+    if core.sum() < 100:
+        # Thin slab (a coronal STIR can be only a few slices thick): erode less.
+        core = binary_erode(body, max(1, core_iterations // 4))
+        if core.sum() < 100:
+            return None
+    rim = body & ~binary_erode(body, rim_iterations)
+    if rim.sum() < 100:
+        return None
+    rim_p90 = float(np.percentile(image[rim], 90))
+    core_median = float(np.median(image[core]))
+    if core_median <= 0:
+        return None
+    return {
+        "rim_voxels": int(rim.sum()),
+        "core_voxels": int(core.sum()),
+        "rim_p90": round(rim_p90, 3),
+        "core_median": round(core_median, 3),
+        "rim_to_core_ratio": round(rim_p90 / core_median, 3),
+    }
 
 
 #: Semantic labels that swap meaning when the volume is mirrored left<->right.

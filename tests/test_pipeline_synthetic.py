@@ -53,6 +53,8 @@ def _level_slices():
 
 
 def build_masks():
+    """Phantom masks with real facet anatomy: each level carries a superior and an
+    inferior articular process per side, so consecutive levels form a joint."""
     instance = np.zeros((LR, AP, SI), dtype=np.int16)
     semantic = np.zeros((LR, AP, SI), dtype=np.int16)
     for label, z in _level_slices().items():
@@ -60,10 +62,26 @@ def build_masks():
         instance[LEFT_LR, FACET_AP, z] = label
         instance[RIGHT_LR, FACET_AP, z] = label
         semantic[BODY_LR, BODY_AP, z] = L.VERTEBRA_CORPUS_BORDER
-        semantic[LEFT_LR, FACET_AP, z] = L.SUPERIOR_ARTICULAR_LEFT
-        semantic[RIGHT_LR, FACET_AP, z] = L.SUPERIOR_ARTICULAR_RIGHT
         semantic[7:9, 20:24, z] = L.SPINAL_CORD
+        # Superior processes at the top of the level, inferior at the bottom; the
+        # inferior process of one level and the superior process of the next are
+        # then two voxels apart, which is what forms the joint interface.
+        top = slice(z.start, z.start + 4)
+        bottom = slice(z.stop - 4, z.stop)
+        semantic[LEFT_LR, FACET_AP, top] = L.SUPERIOR_ARTICULAR_LEFT
+        semantic[RIGHT_LR, FACET_AP, top] = L.SUPERIOR_ARTICULAR_RIGHT
+        semantic[LEFT_LR, FACET_AP, bottom] = L.INFERIOR_ARTICULAR_LEFT
+        semantic[RIGHT_LR, FACET_AP, bottom] = L.INFERIOR_ARTICULAR_RIGHT
     return instance, semantic
+
+
+def _joint_gap_slices():
+    """SI extent of each inter-level gap, keyed by (upper, lower) label."""
+    levels = _level_slices()
+    out = {}
+    for upper, lower in zip(LEVELS, LEVELS[1:]):
+        out[(upper, lower)] = slice(levels[upper].stop, levels[lower].start)
+    return out
 
 
 def build_image(*, bright_level: int | None = None, bright_side: str | None = None,
@@ -82,8 +100,21 @@ def build_image(*, bright_level: int | None = None, bright_side: str | None = No
     return image
 
 
+def build_axial_image(*, bright_joint_side: str | None = None, rng_seed: int = 5):
+    """Phantom 'axial' series. Orientation is not what is under test here — the
+    measurement logic is — so the same grid is reused with different content."""
+    rng = np.random.default_rng(rng_seed)
+    image = np.clip(rng.normal(100.0, 4.0, (LR, AP, SI)), 20.0, None)
+    if bright_joint_side is not None:
+        lr = LEFT_LR if bright_joint_side == "left" else RIGHT_LR
+        for gap in _joint_gap_slices().values():
+            image[lr, FACET_AP, gap] = 300.0
+    return image
+
+
 def seed_study(tmp_path, *, fatsat: bool, bright_level=None, bright_side=None,
-               left_out_of_field: bool = False) -> Config:
+               left_out_of_field: bool = False, axial: bool = False,
+               axial_bright_side: str | None = None) -> Config:
     cfg = Config(work_dir=tmp_path / "work", subject_id="phantom",
                  stages=("geometry", "marrow", "posterior", "radiomics", "report"))
     cfg.ensure_dirs()
@@ -98,6 +129,9 @@ def seed_study(tmp_path, *, fatsat: bool, bright_level=None, bright_side=None,
     picks = {"T2_SAG": t2_path, "T1_SAG": None, "T2_AX": None,
              "FATSAT_BEST": None, "FATSAT_PLANE": None, "FATSAT_LABEL": None,
              "limitations": []}
+    if axial:
+        picks["T2_AX"] = _save(build_axial_image(bright_joint_side=axial_bright_side),
+                               cfg.nifti_dir / "t2_ax.nii.gz")
     if fatsat:
         stir = build_image(bright_level=bright_level, bright_side=bright_side, rng_seed=2)
         if left_out_of_field:
@@ -260,13 +294,21 @@ class TestRegisteredMasks:
         # the numbers must not change, but the provenance flag must.
         spineps = json.loads((cfg.stage_dir / "spineps.json").read_text(encoding="utf-8"))["data"]
         _write_stage(cfg, "register", {
-            "space": "fatsat",
-            "applied": applied,
-            "instance_mask": spineps["instance_masks"][0],
-            "semantic_mask": spineps["semantic_masks"][0],
-            "registration": {"translation_magnitude_mm": 1.2 if applied else 0.0,
-                             "rotation_deg": 0.4 if applied else 0.0,
-                             "reason": None if applied else "did not improve the metric"},
+            "moving_image": spineps["instance_masks"][0],
+            "targets": {
+                "fatsat": {
+                    "image": "irrelevant-for-this-test",
+                    "plane": "sagittal",
+                    "applied": applied,
+                    "instance_mask": spineps["instance_masks"][0],
+                    "semantic_mask": spineps["semantic_masks"][0],
+                    "registration": {
+                        "translation_magnitude_mm": 1.2 if applied else 0.0,
+                        "rotation_deg": 0.4 if applied else 0.0,
+                        "reason": None if applied else "did not improve the metric",
+                    },
+                }
+            },
         })
         return cfg
 
@@ -300,12 +342,239 @@ class TestQualityProfile:
         assert results["crosscheck"].status.value == "skipped"
         assert "quality" in results["crosscheck"].reason
 
-    def test_register_skips_cleanly_without_simpleitk_or_fatsat(self, tmp_path):
+    def test_register_skips_when_there_is_nothing_to_register_onto(self, tmp_path):
+        # Only a sagittal T2: the masks are already in the only space that exists.
         cfg = seed_study(tmp_path, fatsat=False)
         cfg.stages = ("register",)
         results = run_pipeline(cfg, log=lambda *_: None)
         assert results["register"].status.value == "skipped"
-        assert "fat-suppressed" in results["register"].reason
+        assert "no other series" in results["register"].reason
+
+
+class TestFacetsAxial:
+    """The axial branch: per-joint, per-side measurement."""
+
+    def _run(self, tmp_path, **kw):
+        cfg = seed_study(tmp_path, fatsat=False, axial=True, **kw)
+        cfg.stages = ("facets_axial", "report")
+        return cfg, run_pipeline(cfg, log=lambda *_: None)
+
+    def test_measures_each_adjacent_pair_as_a_joint(self, tmp_path):
+        _, results = self._run(tmp_path)
+        joints = [j["joint"] for j in results["facets_axial"].data["joints"]]
+        assert joints == ["T9-T10", "T10-T11", "T11-T12", "T12-L1"]
+
+    def test_finds_the_side_with_the_bright_joint(self, tmp_path):
+        _, results = self._run(tmp_path, axial_bright_side="right")
+        data = results["facets_axial"].data
+        assert data["n_comparable"] >= 3
+        top = data["largest_side_difference"][0]
+        assert top["higher_side"] == "right"
+        for joint in data["joints"]:
+            if joint.get("comparable"):
+                sides = joint["sides"]
+                assert sides["right"]["bright_fraction"] > sides["left"]["bright_fraction"]
+
+    def test_symmetric_phantom_shows_no_side_preference(self, tmp_path):
+        _, results = self._run(tmp_path)
+        for joint in results["facets_axial"].data["joints"]:
+            if not joint.get("comparable"):
+                continue
+            # Noise only: both sides should be at or near zero bright fraction.
+            assert joint["sides"]["left"]["bright_fraction"] < 0.2
+            assert joint["sides"]["right"]["bright_fraction"] < 0.2
+
+    def test_reports_volume_per_side_in_mm3(self, tmp_path):
+        _, results = self._run(tmp_path)
+        first = results["facets_axial"].data["joints"][0]["sides"]["left"]
+        assert first["interface_volume_mm3"] > 0
+
+    def test_refuses_to_report_a_joint_width(self, tmp_path):
+        _, results = self._run(tmp_path)
+        data = results["facets_axial"].data
+        assert not any("width_mm" in k for k in _all_keys(data))
+        assert any("width in millimetres" in x for x in data["interpretation_limits"])
+
+    def test_states_that_oedema_is_not_assessable_without_fat_suppression(self, tmp_path):
+        _, results = self._run(tmp_path)
+        limits = " ".join(results["facets_axial"].data["interpretation_limits"])
+        assert "no fat suppression" in limits
+
+    def test_skipped_without_an_axial_series(self, tmp_path):
+        cfg = seed_study(tmp_path, fatsat=True)
+        cfg.stages = ("facets_axial",)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        assert results["facets_axial"].status.value == "skipped"
+        assert "axial" in results["facets_axial"].reason
+
+    def test_report_renders_the_axial_section(self, tmp_path):
+        cfg, _ = self._run(tmp_path, axial_bright_side="right")
+        html_text = (cfg.results_dir / "report.html").read_text(encoding="utf-8")
+        assert "Фасеточные суставы по уровням" in html_text
+        assert "T10-T11" in html_text
+
+
+def _all_keys(obj, out=None):
+    """Every key appearing anywhere in a nested structure."""
+    out = set() if out is None else out
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.add(k)
+            _all_keys(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _all_keys(v, out)
+    return out
+
+
+def _body_phantom(rim_value: float, core_value: float = 100.0, *, seed: int = 7):
+    """A body with a distinct subcutaneous band, for the fat-suppression check."""
+    rng = np.random.default_rng(seed)
+    vol = np.zeros((LR, AP, SI))
+    vol[2:LR - 2, 6:AP - 6, 6:SI - 6] = rim_value
+    vol[4:LR - 4, 14:AP - 14, 14:SI - 14] = core_value
+    return np.clip(vol + rng.normal(0, 2.0, vol.shape) * (vol > 0), 0, None)
+
+
+class TestFatSuppressionGate:
+    """A series that claims fat suppression but does not show it must not be trusted."""
+
+    def _seed(self, tmp_path, *, fat_rim: float):
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, bright_side="right")
+        cfg.stages = ("fatsat_qc", "marrow", "posterior", "report")
+        picks = json.loads((cfg.stage_dir / "ingest.json").read_text(encoding="utf-8"))["data"]["picks"]
+        # Control T2: bright subcutaneous fat. Suppressed series: `fat_rim` decides
+        # whether the band actually darkens.
+        picks["T2_SAG"] = _save(_body_phantom(400.0), cfg.nifti_dir / "t2_body.nii.gz")
+        picks["FATSAT_BEST"] = _save(_body_phantom(fat_rim),
+                                     cfg.nifti_dir / "stir_body.nii.gz")
+        picks["FATSAT_PLANE"] = "coronal"
+        picks["FATSAT_LABEL"] = "T2 FS"
+        _write_stage(cfg, "ingest", {"picks": picks, "n_series": 2, "series": []})
+        return cfg
+
+    def test_working_suppression_is_confirmed(self, tmp_path):
+        cfg = self._seed(tmp_path, fat_rim=60.0)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        qc = results["fatsat_qc"]
+        assert qc.data["suppression_effective"] is True
+        assert qc.status.value == "ok"
+
+    def test_absent_suppression_is_caught(self, tmp_path):
+        cfg = self._seed(tmp_path, fat_rim=400.0)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        qc = results["fatsat_qc"]
+        assert qc.data["suppression_effective"] is False
+        assert "NO evidence of fat suppression" in qc.data["verdict"]
+
+    def test_marrow_carries_the_warning_forward(self, tmp_path):
+        cfg = self._seed(tmp_path, fat_rim=400.0)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        marrow = results["marrow"]
+        if marrow.data:  # the phantom body may leave too few vertebrae measurable
+            assert marrow.data["fat_suppression_verified"] is False
+            assert any("FAT SUPPRESSION NOT CONFIRMED" in x
+                       for x in marrow.data["interpretation_limits"])
+
+    def test_posterior_is_downgraded_to_not_diagnostic(self, tmp_path):
+        cfg = self._seed(tmp_path, fat_rim=400.0)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        assert results["posterior"].evidence.value == "not_diagnostic"
+        assert any("FAT SUPPRESSION NOT CONFIRMED" in x
+                   for x in results["posterior"].data["interpretation_limits"])
+
+    def test_report_shows_the_check(self, tmp_path):
+        cfg = self._seed(tmp_path, fat_rim=400.0)
+        run_pipeline(cfg, log=lambda *_: None)
+        html_text = (cfg.results_dir / "report.html").read_text(encoding="utf-8")
+        assert "Работает ли подавление жира" in html_text
+
+    def test_unchecked_suppression_is_flagged_as_assumed(self, tmp_path):
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18)
+        cfg.stages = ("marrow",)   # fatsat_qc deliberately not run
+        results = run_pipeline(cfg, log=lambda *_: None)
+        assert results["marrow"].data["fat_suppression_verified"] is None
+        assert any("not checked" in x
+                   for x in results["marrow"].data["interpretation_limits"])
+
+
+class TestReportNumbering:
+    def test_sections_are_numbered_once_and_in_order(self, tmp_path):
+        import re
+
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, bright_side="right",
+                         axial=True, axial_bright_side="right")
+        cfg.stages = ("geometry", "facets_axial", "posterior", "marrow", "report")
+        run_pipeline(cfg, log=lambda *_: None)
+        html_text = (cfg.results_dir / "report.html").read_text(encoding="utf-8")
+        numbers = [int(n) for n in re.findall(r"<h2>(\d+)\.", html_text)]
+        assert numbers == list(range(1, len(numbers) + 1)), numbers
+
+    def test_no_unrendered_template_braces_leak_into_the_html(self, tmp_path):
+        cfg = seed_study(tmp_path, fatsat=True, axial=True)
+        cfg.stages = ("geometry", "facets_axial", "report")
+        run_pipeline(cfg, log=lambda *_: None)
+        html_text = (cfg.results_dir / "report.html").read_text(encoding="utf-8")
+        for leak in ("{_h2(", "badge_html(", "{data.", "{'"):
+            assert leak not in html_text, leak
+
+
+class TestStageContract:
+    """Every stage must degrade, never crash — checked against all of them."""
+
+    def test_every_default_stage_is_registered(self):
+        from spinelab.config import DEFAULT_STAGES
+        from spinelab.pipeline import _registry
+
+        registry = _registry()
+        assert set(DEFAULT_STAGES) <= set(registry)
+        assert set(registry) - set(DEFAULT_STAGES) == set()
+
+    def test_nothing_fails_on_an_empty_workspace(self, tmp_path):
+        # No data at all: stages must report `skipped` with a reason. A `failed`
+        # here means a stage crashed on absent input instead of saying so.
+        cfg = Config(work_dir=tmp_path / "empty", dicom_source=str(tmp_path / "nope.zip"))
+        results = run_pipeline(cfg, log=lambda *_: None)
+        failed = {n: r.reason for n, r in results.items() if r.status.value == "failed"}
+        assert failed == {}
+        for name, res in results.items():
+            if res.status.value == "skipped":
+                assert res.reason, f"{name} skipped without saying why"
+
+    def test_report_is_produced_even_when_everything_skipped(self, tmp_path):
+        cfg = Config(work_dir=tmp_path / "empty", dicom_source=str(tmp_path / "nope.zip"))
+        run_pipeline(cfg, log=lambda *_: None)
+        assert (cfg.results_dir / "report.html").exists()
+        assert (cfg.results_dir / "findings.json").exists()
+
+    def test_all_analysis_stages_run_on_the_phantom(self, tmp_path):
+        # Everything that does not need an external binary or GPU.
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, bright_side="right",
+                         axial=True, axial_bright_side="right")
+        cfg.stages = ("fatsat_qc", "facets_axial", "geometry", "marrow", "posterior",
+                      "radiomics", "report")
+        results = run_pipeline(cfg, log=lambda *_: None)
+        # The phantom is uniform noise with no body outline, so the fat-suppression
+        # check has nothing to delineate. Skipping with that reason is the correct
+        # behaviour — it must not invent a verdict.
+        assert results["fatsat_qc"].status.value == "skipped"
+        assert "rim and core" in results["fatsat_qc"].reason
+        for name, res in results.items():
+            if name == "fatsat_qc":
+                continue
+            assert res.status.value in ("ok", "partial"), f"{name}: {res.reason}"
+
+    def test_stage_data_survives_a_process_boundary(self, tmp_path):
+        # Resume works by reading the JSON markers, so the data must round-trip
+        # through JSON without losing anything a later stage needs.
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, axial=True)
+        cfg.stages = ("geometry",)
+        run_pipeline(cfg, log=lambda *_: None)
+        fresh = Config(work_dir=cfg.work_dir, subject_id=cfg.subject_id,
+                       stages=("marrow", "posterior", "facets_axial", "report"))
+        results = run_pipeline(fresh, log=lambda *_: None)
+        assert results["facets_axial"].status.value in ("ok", "partial")
+        assert results["report"].status.value == "ok"
 
 
 class TestCoverageGuard:

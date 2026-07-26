@@ -51,12 +51,28 @@ def run(ctx: Context) -> StageResult:
     if not instance_masks:
         raise SkipStage("no SPINEPS vertebra instance mask")
 
+    # If the fat suppression could not be confirmed, bright signal here may simply
+    # be fat. The measurement still runs — the numbers are what they are — but it
+    # must not be read as anything oedema-related, and that has to travel with it.
+    qc = ctx.stage_data("fatsat_qc")
+    suppression_ok = qc.get("suppression_effective") if qc else None
+    suppression_note: list[str] = []
+    if suppression_ok is False:
+        suppression_note.append(
+            "FAT SUPPRESSION NOT CONFIRMED on this series (" + str(qc.get("verdict")) +
+            "). Bright signal below may be fat rather than fluid; do not read these "
+            "numbers as oedema.")
+    elif suppression_ok is None:
+        suppression_note.append(
+            "Fat suppression was not checked (the fatsat_qc stage did not run), so it is "
+            "assumed rather than verified.")
+
     img = load_canonical(fatsat)
     image = np.asarray(img.get_fdata(), dtype=float)
 
     # Prefer masks that `register` already moved into this series' space with a
     # motion-corrected transform; fall back to header-based resampling.
-    registered = ctx.masks_in_fatsat_space()
+    registered = ctx.masks_in_space("fatsat")
     if registered:
         instance_masks = [registered["instance_mask"]]
         semantic_masks = [registered["semantic_mask"]] if registered.get("semantic_mask") else []
@@ -135,7 +151,8 @@ def run(ctx: Context) -> StageResult:
         "excluded": [s.to_dict() for s in excluded],
         "top_candidates": [r["name"] for r in ranked[:3]
                            if r["outlier_voxels"] >= cfg.marrow_min_outlier_voxels],
-        "interpretation_limits": [
+        "fat_suppression_verified": suppression_ok,
+        "interpretation_limits": suppression_note + [
             "A modified z-score inside one vertebra measures internal signal "
             "heterogeneity, not oedema. Degenerative endplate changes, haemangiomas, "
             "vessels and coil shading all raise it.",

@@ -69,10 +69,16 @@ def rigid_register(fixed_path: str, moving_path: str, *, sampling_percentage: fl
     fixed = sitk.Cast(sitk.ReadImage(str(fixed_path)), sitk.sitkFloat32)
     moving = sitk.Cast(sitk.ReadImage(str(moving_path)), sitk.sitkFloat32)
 
-    initial = sitk.CenteredTransformInitializer(
-        fixed, moving, sitk.Euler3DTransform(),
-        sitk.CenteredTransformInitializerFilter.GEOMETRY,
-    )
+    # The initial transform must be the IDENTITY, so that "no correction" means
+    # "aligned exactly as the DICOM geometry says". CenteredTransformInitializer
+    # would instead align the two images' bounding-box centres — and these series
+    # have fields of view of 340, 320 and 250 mm, so centring them introduces a
+    # shift of centimetres before the optimiser even starts, invalidates the
+    # "implausible correction" guard, and makes the reported translation a number
+    # relative to a wrong starting point.
+    initial = sitk.Euler3DTransform()
+    initial.SetCenter(fixed.TransformContinuousIndexToPhysicalPoint(
+        [(size - 1) / 2.0 for size in fixed.GetSize()]))
 
     reg = sitk.ImageRegistrationMethod()
     reg.SetMetricAsMattesMutualInformation(numberOfHistogramBins=48)
@@ -99,10 +105,14 @@ def rigid_register(fixed_path: str, moving_path: str, *, sampling_percentage: fl
         )
 
     metric_after = reg.GetMetricValue()
-    euler = sitk.Euler3DTransform(transform)
-    tx, ty, tz = euler.GetTranslation()
+    described = _describe_transform(transform)
+    if described is None:
+        return initial, RegistrationResult(
+            applied=False, metric_before=metric_before, metric_after=metric_after,
+            reason="could not read the optimised transform parameters — keeping the "
+                   "header alignment")
+    (tx, ty, tz), rotation = described
     magnitude = float((tx ** 2 + ty ** 2 + tz ** 2) ** 0.5)
-    rotation = _rotation_magnitude_deg(euler)
 
     result = RegistrationResult(
         applied=True,
@@ -126,6 +136,46 @@ def rigid_register(fixed_path: str, moving_path: str, *, sampling_percentage: fl
         result.reason = "registration did not improve the metric — keeping the header alignment"
         return initial, result
     return transform, result
+
+
+def _describe_transform(transform) -> tuple[tuple[float, float, float], float] | None:
+    """(translation_mm, total_rotation_deg) from whatever Execute returned.
+
+    Depending on the SimpleITK version, `Execute` gives back either the transform
+    type it was initialised with or a CompositeTransform wrapping it. Constructing
+    an Euler3DTransform from the latter raises, so both are handled, and an
+    unrecognised type is reported rather than guessed at.
+    """
+    import SimpleITK as sitk
+
+    candidates = [transform]
+    try:
+        composite = sitk.CompositeTransform(transform)
+        candidates += [composite.GetNthTransform(i)
+                       for i in range(composite.GetNumberOfTransforms())]
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        try:
+            euler = sitk.Euler3DTransform(candidate)
+        except Exception:
+            continue
+        tx, ty, tz = euler.GetTranslation()
+        return (float(tx), float(ty), float(tz)), _rotation_magnitude_deg(euler)
+
+    # Fall back to raw parameters: a rigid 3D transform has 6 (3 angles, 3 shifts).
+    try:
+        params = list(transform.GetParameters())
+    except Exception:
+        return None
+    if len(params) != 6:
+        return None
+    import math
+
+    angles, shifts = params[:3], params[3:]
+    total = math.degrees(math.sqrt(sum(a * a for a in angles)))
+    return (float(shifts[0]), float(shifts[1]), float(shifts[2])), float(total)
 
 
 def _rotation_magnitude_deg(euler) -> float:

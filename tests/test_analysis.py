@@ -8,10 +8,14 @@ import pytest
 from spinelab import labels as L
 from spinelab.analysis import (
     asymmetry_ratio,
+    binary_dilate,
+    binary_erode,
     body_heights,
     bright_fraction,
     canal_area_profile,
     curvature_metrics,
+    facet_interface,
+    rim_to_core_ratio,
     dice,
     label_agreement,
     longest_run,
@@ -235,6 +239,107 @@ class TestSides:
         left, right = split_by_midline(mask, 5)
         assert left[:5].all() and not left[5:].any()
         assert right[5:].all() and not right[:5].any()
+
+
+class TestMorphology:
+    def test_dilation_grows_by_one_voxel_per_iteration(self):
+        mask = np.zeros((9, 9, 9), dtype=bool)
+        mask[4, 4, 4] = True
+        assert binary_dilate(mask, 1).sum() == 7        # centre + 6 neighbours
+        assert binary_dilate(mask, 2).sum() == 25
+
+    def test_dilation_does_not_wrap_around_the_volume(self):
+        # np.roll would grow the last slice into the first one.
+        mask = np.zeros((5, 5, 5), dtype=bool)
+        mask[4, 2, 2] = True
+        grown = binary_dilate(mask, 1)
+        assert not grown[0].any()
+
+    def test_erosion_removes_the_boundary_layer(self):
+        mask = np.zeros((9, 9, 9), dtype=bool)
+        mask[2:7, 2:7, 2:7] = True
+        assert binary_erode(mask, 1).sum() == 3 ** 3
+
+    def test_erosion_does_not_eat_the_volume_faces(self):
+        # A body touching the field of view must lose its rim to anatomy, not to
+        # the array border.
+        mask = np.ones((6, 6, 6), dtype=bool)
+        assert binary_erode(mask, 1).all()
+
+    def test_zero_iterations_is_identity(self):
+        mask = np.zeros((4, 4, 4), dtype=bool)
+        mask[1, 1, 1] = True
+        assert np.array_equal(binary_dilate(mask, 0), mask)
+        assert np.array_equal(binary_erode(mask, 0), mask)
+
+
+class TestFatSuppressionRatio:
+    def _phantom(self, rim_value: float, core_value: float = 100.0):
+        """A block 'body' with a distinct band just inside its surface."""
+        vol = np.zeros((30, 30, 30))
+        vol[5:25, 5:25, 5:25] = rim_value
+        vol[9:21, 9:21, 9:21] = core_value
+        return vol
+
+    def test_unsuppressed_fat_gives_a_high_ratio(self):
+        stats = rim_to_core_ratio(self._phantom(rim_value=400.0), core_iterations=4)
+        assert stats is not None
+        assert stats["rim_to_core_ratio"] > 3.0
+
+    def test_suppressed_fat_gives_a_low_ratio(self):
+        stats = rim_to_core_ratio(self._phantom(rim_value=60.0), core_iterations=4)
+        assert stats["rim_to_core_ratio"] < 1.0
+
+    def test_returns_none_when_there_is_no_body(self):
+        assert rim_to_core_ratio(np.zeros((20, 20, 20))) is None
+
+    def test_returns_none_for_a_tiny_volume(self):
+        assert rim_to_core_ratio(np.ones((3, 3, 3))) is None
+
+
+class TestFacetInterface:
+    def _masks(self):
+        """Two stacked vertebrae, each with articular processes, one voxel apart."""
+        sem = np.zeros((12, 12, 24), dtype=np.int32)
+        inst = np.zeros((12, 12, 24), dtype=np.int32)
+        # upper vertebra = label 16, occupies z 4..12; lower = 17, z 14..22
+        inst[4:8, 4:8, 4:12] = 16
+        inst[4:8, 4:8, 14:22] = 17
+        sem[4:8, 4:8, 8:12] = L.INFERIOR_ARTICULAR_LEFT   # bottom of the upper one
+        sem[4:8, 4:8, 14:18] = L.SUPERIOR_ARTICULAR_LEFT  # top of the lower one
+        return sem, inst
+
+    def test_interface_lies_between_the_two_processes(self):
+        sem, inst = self._masks()
+        roi = facet_interface(sem, inst, upper_label=16, lower_label=17,
+                              inferior_process=L.INFERIOR_ARTICULAR_LEFT,
+                              superior_process=L.SUPERIOR_ARTICULAR_LEFT, dilate=2)
+        assert roi.any()
+        zs = np.flatnonzero(roi.any(axis=(0, 1)))
+        # The gap is z 12..14; the interface must sit there, not inside the bones.
+        assert zs.min() >= 10 and zs.max() <= 15
+
+    def test_no_interface_when_a_process_is_missing(self):
+        sem, inst = self._masks()
+        sem[sem == L.SUPERIOR_ARTICULAR_LEFT] = 0
+        roi = facet_interface(sem, inst, upper_label=16, lower_label=17,
+                              inferior_process=L.INFERIOR_ARTICULAR_LEFT,
+                              superior_process=L.SUPERIOR_ARTICULAR_LEFT)
+        assert not roi.any()
+
+    def test_sides_do_not_leak_into_each_other(self):
+        sem, inst = self._masks()
+        roi_right = facet_interface(sem, inst, upper_label=16, lower_label=17,
+                                    inferior_process=L.INFERIOR_ARTICULAR_RIGHT,
+                                    superior_process=L.SUPERIOR_ARTICULAR_RIGHT)
+        assert not roi_right.any()
+
+    def test_non_adjacent_levels_do_not_form_a_joint(self):
+        sem, inst = self._masks()
+        roi = facet_interface(sem, inst, upper_label=16, lower_label=99,
+                              inferior_process=L.INFERIOR_ARTICULAR_LEFT,
+                              superior_process=L.SUPERIOR_ARTICULAR_LEFT)
+        assert not roi.any()
 
 
 class TestMirrorTTA:

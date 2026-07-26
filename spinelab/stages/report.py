@@ -40,14 +40,30 @@ ul{margin:8px 0 8px 18px}
 """
 
 
+#: Section numbers are assigned as sections are emitted, never written by hand:
+#: hand-numbering already produced two sections called "9".
+_SECTION_COUNTER = {"n": 0}
+
+
+def _h2(title: str) -> str:
+    _SECTION_COUNTER["n"] += 1
+    return f"<h2>{_SECTION_COUNTER['n']}. {html.escape(title)}</h2>"
+
+
 def run(ctx: Context) -> StageResult:
     cfg = ctx.config
+    _SECTION_COUNTER["n"] = 0
     sections: list[str] = []
 
     ingest = ctx.stage_data("ingest")
     picks = ingest.get("picks", {})
     sections.append(_study_section(ingest, picks))
+    sections.append(_fatsat_qc_section(ctx))
+    figure = _try_figure(ctx)
+    if figure:
+        sections.append(figure)
     sections.append(_geometry_section(ctx))
+    sections.append(_facets_axial_section(ctx))
     sections.append(_posterior_section(ctx))
     sections.append(_marrow_section(ctx))
     sections.append(_muscle_section(ctx))
@@ -57,10 +73,6 @@ def run(ctx: Context) -> StageResult:
     sections.append(_reliability_section(ctx))
     sections.append(_not_assessable_section(ctx, picks))
     sections.append(_status_section(ctx))
-
-    figure = _try_figure(ctx)
-    if figure:
-        sections.insert(3, figure)
 
     body = "\n".join(s for s in sections if s)
     doc = (
@@ -118,13 +130,13 @@ def _study_section(ingest: dict, picks: dict) -> str:
     limit_html = ("<div class='warn'><b>Ограничения этого исследования:</b><ul>"
                   + "".join(f"<li>{html.escape(x)}</li>" for x in limits)
                   + "</ul></div>") if limits else ""
-    return f"<h2>1. Что было в исследовании</h2>{table}{limit_html}"
+    return f"{_h2('Что было в исследовании')}{table}{limit_html}"
 
 
 def _geometry_section(ctx: Context) -> str:
     data, note = _stage(ctx, "geometry")
     if note:
-        return f"<h2>2. Геометрия позвонков {badge_html(Evidence.MEASUREMENT)}</h2>{note}"
+        return f"{_h2('Геометрия позвонков')} {badge_html(Evidence.MEASUREMENT)}{note}"
     rows = "".join(
         f"<tr><td>{html.escape(v['name'])}</td>"
         f"<td>{v.get('anterior_height_mm','—')}</td>"
@@ -153,7 +165,7 @@ def _geometry_section(ctx: Context) -> str:
         )
     notes = "".join(f"<li>{html.escape(n)}</li>" for n in data.get("notes", []))
     return (
-        f"<h2>2. Геометрия позвонков {badge_html(Evidence.MEASUREMENT)}</h2>"
+        f"{_h2('Геометрия позвонков')} {badge_html(Evidence.MEASUREMENT)}"
         f"<table><tr><th>Уровень</th><th>Передняя высота, мм</th>"
         f"<th>Задняя высота, мм</th><th>Клиновидность, °</th></tr>{rows}</table>"
         f"{curv_html}<div class='box'><b>Что показывают числа:</b> {verdict}</div>"
@@ -164,7 +176,7 @@ def _geometry_section(ctx: Context) -> str:
 def _posterior_section(ctx: Context) -> str:
     data, note = _stage(ctx, "posterior")
     level = Evidence.HEURISTIC if (data or {}).get("fat_suppressed") else Evidence.NOT_DIAGNOSTIC
-    head = f"<h2>3. Фасеточные и рёберно-позвоночные зоны {badge_html(level)}</h2>"
+    head = f"{_h2('Фасеточные и рёберно-позвоночные зоны')} {badge_html(level)}"
     if note:
         return head + note
     blocks = []
@@ -214,7 +226,7 @@ def _posterior_section(ctx: Context) -> str:
 
 def _marrow_section(ctx: Context) -> str:
     data, note = _stage(ctx, "marrow")
-    head = f"<h2>4. Сигнал костного мозга тел позвонков {badge_html(Evidence.HEURISTIC)}</h2>"
+    head = f"{_h2('Сигнал костного мозга тел позвонков')} {badge_html(Evidence.HEURISTIC)}"
     if note:
         return head + note
     rows = "".join(
@@ -241,7 +253,7 @@ def _marrow_section(ctx: Context) -> str:
 
 def _muscle_section(ctx: Context) -> str:
     data, note = _stage(ctx, "muscles")
-    head = f"<h2>5. Паравертебральные мышцы {badge_html(Evidence.MEASUREMENT)}</h2>"
+    head = f"{_h2('Паравертебральные мышцы')} {badge_html(Evidence.MEASUREMENT)}"
     if note:
         return head + note
     rows = "".join(
@@ -263,7 +275,7 @@ def _muscle_section(ctx: Context) -> str:
 
 def _canal_section(ctx: Context) -> str:
     data, note = _stage(ctx, "canal")
-    head = f"<h2>6. Позвоночный канал {badge_html(Evidence.MEASUREMENT)}</h2>"
+    head = f"{_h2('Позвоночный канал')} {badge_html(Evidence.MEASUREMENT)}"
     if note:
         return head + note
     limits = "".join(f"<li>{html.escape(x)}</li>" for x in data.get("interpretation_limits", []))
@@ -283,7 +295,7 @@ def _canal_section(ctx: Context) -> str:
 
 def _disc_section(ctx: Context) -> str:
     data, note = _stage(ctx, "discs")
-    head = f"<h2>7. Диски: относительный сигнал {badge_html(Evidence.MEASUREMENT)}</h2>"
+    head = f"{_h2('Диски: относительный сигнал')} {badge_html(Evidence.MEASUREMENT)}"
     if note:
         return head + note
     rows = "".join(
@@ -299,7 +311,7 @@ def _disc_section(ctx: Context) -> str:
 
 def _agreement_section(ctx: Context) -> str:
     data, note = _stage(ctx, "agreement")
-    head = f"<h2>8. Согласие двух инструментов {badge_html(Evidence.MEASUREMENT)}</h2>"
+    head = f"{_h2('Согласие двух инструментов')} {badge_html(Evidence.MEASUREMENT)}"
     if note:
         return head + note
     ok = data.get("agreement_ok")
@@ -310,19 +322,88 @@ def _agreement_section(ctx: Context) -> str:
                "требуют визуальной проверки.</div>"))
 
 
+def _fatsat_qc_section(ctx: Context) -> str:
+    """Whether the fat suppression worked — this gates everything about oedema."""
+    data, note = _stage(ctx, "fatsat_qc")
+    head = f"{_h2('Работает ли подавление жира')} {badge_html(Evidence.HEURISTIC)}"
+    if note:
+        return head + note
+    fat = data.get("fatsat_stats") or {}
+    ctl = data.get("control_stats") or {}
+    ok = data.get("suppression_effective")
+    rows = (
+        f"<tr><td>{html.escape(str(data.get('fatsat_label')))} "
+        f"({html.escape(str(data.get('fatsat_plane')))})</td>"
+        f"<td>{fat.get('rim_p90','—')}</td><td>{fat.get('core_median','—')}</td>"
+        f"<td><b>{fat.get('rim_to_core_ratio','—')}</b></td></tr>"
+    )
+    if ctl:
+        rows += (f"<tr><td>обычная T2 (контроль)</td><td>{ctl.get('rim_p90','—')}</td>"
+                 f"<td>{ctl.get('core_median','—')}</td>"
+                 f"<td>{ctl.get('rim_to_core_ratio','—')}</td></tr>")
+    limits = "".join(f"<li>{html.escape(x)}</li>" for x in data.get("interpretation_limits", []))
+    return (head
+            + "<p class='mute'>Подкожный жир образует полосу под кожей. Если жир подавлен, "
+              "эта полоса не ярче глубоких тканей. Сравнение того же измерения на двух "
+              "сериях одного исследования снимает вопрос о масштабе сигнала.</p>"
+            + f"<table><tr><th>Серия</th><th>p90 полосы</th><th>медиана ядра</th>"
+              f"<th>отношение</th></tr>{rows}</table>"
+            + (f"<div class='{'box' if ok else 'warn'}'><b>Вывод:</b> "
+               f"{html.escape(str(data.get('verdict')))}</div>")
+            + f"<div class='warn'><b>Границы применимости:</b><ul>{limits}</ul></div>")
+
+
+def _facets_axial_section(ctx: Context) -> str:
+    """Per-joint facet measurement on the axial series."""
+    data, note = _stage(ctx, "facets_axial")
+    head = f"{_h2('Фасеточные суставы по уровням (аксиальная T2)')} {badge_html(Evidence.HEURISTIC)}"
+    if note:
+        return head + note
+    rows = []
+    for joint in data.get("joints", []):
+        left = (joint.get("sides") or {}).get("left") or {}
+        right = (joint.get("sides") or {}).get("right") or {}
+        cmp_bright = (joint.get("comparison") or {}).get("bright_fraction") or {}
+        comparable = joint.get("comparable")
+        rows.append(
+            f"<tr><td>{html.escape(joint['joint'])}</td>"
+            f"<td>{left.get('interface_volume_mm3','—')}</td>"
+            f"<td>{right.get('interface_volume_mm3','—')}</td>"
+            f"<td>{left.get('bright_fraction','—')}</td>"
+            f"<td>{right.get('bright_fraction','—')}</td>"
+            f"<td>{cmp_bright.get('ratio','—') if comparable else '—'}</td>"
+            f"<td>{(cmp_bright.get('higher_side') or '—') if comparable else 'не сравнимо'}</td></tr>"
+        )
+    top = data.get("largest_side_difference") or []
+    top_html = ("<div class='box'><b>Наибольшая разница сторон:</b> "
+                + "; ".join(f"{html.escape(t['joint'])} — больше {t['higher_side']} "
+                            f"(+{t['diff_pct']}%)" for t in top)
+                + ". Это порядок просмотра для врача, не находка.</div>") if top else ""
+    limits = "".join(f"<li>{html.escape(x)}</li>" for x in data.get("interpretation_limits", []))
+    return (head
+            + f"<p class='mute'>Область измерения — стык двух отростков, образующих сустав "
+              f"(нижний отросток верхнего позвонка и верхний отросток нижнего). Порог яркости: "
+              f"{data.get('threshold_value','—')} от "
+              f"{html.escape(str(data.get('threshold_reference')))}.</p>"
+            + "<table><tr><th>Сустав</th><th>Объём слева, мм³</th><th>Объём справа, мм³</th>"
+              "<th>Доля ярких слева</th><th>Доля ярких справа</th><th>Отношение</th>"
+              f"<th>Больше</th></tr>{''.join(rows)}</table>"
+            + top_html
+            + f"<div class='warn'><b>Границы применимости:</b><ul>{limits}</ul></div>")
+
+
 def _reliability_section(ctx: Context) -> str:
     """Alignment and per-level model agreement — the caveats behind every number."""
     blocks = []
 
     reg = ctx.stage_data("register")
-    if reg:
-        r = reg.get("registration") or {}
-        applied = reg.get("applied")
+    for name, target in sorted((reg.get("targets") or {}).items()):
+        r = target.get("registration") or {}
+        applied = target.get("applied")
+        label = {"fatsat": "серию с подавлением жира", "axial": "аксиальную серию"}.get(name, name)
         blocks.append(
-            f"<h3>Совмещение серий {badge_html(Evidence.MEASUREMENT)}</h3>"
-            f"<p>Маски с сагиттальной T2 переносились на "
-            f"{html.escape(str(reg.get('fixed_plane')))} серию с подавлением жира. "
-            f"Поправка на движение между сериями: сдвиг "
+            f"<h3>Совмещение: маски → {label} {badge_html(Evidence.MEASUREMENT)}</h3>"
+            f"<p>Поправка на движение между сериями: сдвиг "
             f"<b>{r.get('translation_magnitude_mm','—')} мм</b>, поворот "
             f"<b>{r.get('rotation_deg','—')}°</b>. Применена: <b>"
             f"{'да' if applied else 'нет'}</b>.</p>"
@@ -368,7 +449,7 @@ def _reliability_section(ctx: Context) -> str:
 
     if not blocks:
         return ""
-    return "<h2>9. Надёжность: совмещение и согласие моделей</h2>" + "".join(blocks)
+    return f"{_h2('Надёжность: совмещение и согласие моделей')}" + "".join(blocks)
 
 
 def _not_assessable_section(ctx: Context, picks: dict) -> str:
@@ -391,7 +472,7 @@ def _not_assessable_section(ctx: Context, picks: dict) -> str:
     ]
     if not picks.get("T2_AX"):
         items.append("В этом исследовании <b>нет аксиальной T2</b> — см. пункт про плоскость.")
-    return ("<h2>10. Чего эти данные не могут показать</h2><div class='warn'><ul>"
+    return (f"{_h2('Чего эти данные не могут показать')}<div class='warn'><ul>"
             + "".join(f"<li>{i}</li>" for i in items) + "</ul></div>")
 
 
@@ -402,7 +483,7 @@ def _status_section(ctx: Context) -> str:
         rows.append(f"<tr><td><code>{html.escape(name)}</code></td>"
                     f"<td>{html.escape(status)}</td>"
                     f"<td>{html.escape(res.reason or '—')}</td></tr>")
-    return ("<h2>11. Что выполнялось</h2><table><tr><th>Этап</th><th>Статус</th>"
+    return (f"{_h2('Что выполнялось')}<table><tr><th>Этап</th><th>Статус</th>"
             f"<th>Причина / примечание</th></tr>{''.join(rows)}</table>")
 
 

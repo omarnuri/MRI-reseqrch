@@ -56,6 +56,21 @@ enforces the wording side of this.
 9. **PHI stays out of the repo and out of the report.** Data lives on Drive. The
    report prints `subject_id` only.
 
+## This study's actual data (checked with `spinelab inspect`)
+
+Sagittal T2 and T1 (17 slices, 3.5 mm), coronal STIR (23 slices, 4 mm, TI 100 ms —
+the only fat-suppressed series), axial T2 (66 slices, 4 mm, **0.49 mm in-plane**),
+plus a scout. 1.5 T.
+
+Consequences that shape every design decision here:
+* the axial series is the only plane where thoracic facet joints are resolvable, and
+  it carries the finest resolution in the study — `facets_axial` exists for it;
+* oedema can only come from the coronal STIR, and only if `fatsat_qc` confirms the
+  suppression works;
+* masks are computed on the sagittal T2, whose left-right voxel size (3.5 mm) is the
+  size of a facet joint — so mask-derived left/right precision is coarse, and that
+  caveat belongs in any output that compares sides.
+
 ## Alignment and reliability stages
 
 `register` moves the SPINEPS masks (computed on sagittal T2) onto the
