@@ -166,7 +166,18 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
     if unknown:
         raise ValueError(f"unknown stage(s): {', '.join(unknown)}")
 
+    # A run with no study data at all must not look like a run that found nothing.
+    # Without this, a wrong `dicom_source` produces 16 tidy "skipped" lines, zero
+    # failures and a full report — which reads as success. It happened.
+    aborted: str | None = None
+
     for name in config.stages:
+        if aborted and name != "report":
+            ctx.results[name] = StageResult(
+                name=name, status=Status.SKIPPED,
+                reason=f"run aborted before this stage: {aborted}")
+            continue
+
         marker = config.stage_dir / f"{name}.json"
         if marker.exists() and name not in config.force and name != "report":
             cached = read_json(marker, {}) or {}
@@ -204,7 +215,20 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
         log(f"[{name:17s}] {icon} ({human_duration(result.duration_s)})"
             + (f" — {result.reason}" if result.reason else ""))
 
-    write_json(config.results_dir / "summary.json", summarise(ctx))
+        if name == "ingest" and not (result.ok and result.data.get("picks")):
+            aborted = result.reason or "the study could not be read"
+            log("")
+            log("=" * 70)
+            log("RUN ABORTED — no study data was read, so nothing below could run.")
+            log(f"  reason: {aborted}")
+            log(f"  dicom_source was: {config.dicom_source!r}")
+            log("  Fix that path (or URL) and run again. Every later stage would")
+            log("  otherwise report 'skipped' and the report would look complete.")
+            log("=" * 70)
+
+    summary = summarise(ctx)
+    summary["aborted"] = aborted
+    write_json(config.results_dir / "summary.json", summary)
     return ctx.results
 
 

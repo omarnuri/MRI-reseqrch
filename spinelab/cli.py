@@ -113,6 +113,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"report:  {config.results_dir / 'report.html'}")
     if failed:
         print(f"failed stages: {', '.join(failed)}")
+
+    summary = json.loads((config.results_dir / "summary.json").read_text(encoding="utf-8"))
+    if summary.get("aborted"):
+        # A run that never read a study must not exit 0: that is how "it completed
+        # and found nothing" gets mistaken for a result.
+        print(f"ABORTED: {summary['aborted']}")
+        return 2
     return 1 if failed else 0
 
 

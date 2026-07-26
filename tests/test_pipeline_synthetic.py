@@ -547,6 +547,27 @@ class TestStageContract:
         assert (cfg.results_dir / "report.html").exists()
         assert (cfg.results_dir / "findings.json").exists()
 
+    def test_a_run_without_data_is_aborted_not_quietly_skipped(self, tmp_path):
+        # The failure mode this guards against: a wrong dicom_source produces a
+        # tidy list of "skipped" stages, zero failures and a full report, which
+        # reads as a successful run that found nothing.
+        cfg = Config(work_dir=tmp_path / "empty", dicom_source=str(tmp_path / "nope.zip"))
+        lines: list[str] = []
+        results = run_pipeline(cfg, log=lines.append)
+        assert "RUN ABORTED" in "\n".join(lines)
+        summary = json.loads((cfg.results_dir / "summary.json").read_text(encoding="utf-8"))
+        assert summary["aborted"]
+        # Later stages must say they were aborted, not invent their own reasons.
+        assert "run aborted" in results["geometry"].reason
+
+    def test_the_report_says_no_data_instead_of_no_findings(self, tmp_path):
+        cfg = Config(work_dir=tmp_path / "empty", dicom_source=str(tmp_path / "nope.zip"))
+        run_pipeline(cfg, log=lambda *_: None)
+        html_text = (cfg.results_dir / "report.html").read_text(encoding="utf-8")
+        assert "Прогон не состоялся" in html_text
+        assert "не запускались" in html_text
+        assert "nope.zip" in html_text
+
     def test_all_analysis_stages_run_on_the_phantom(self, tmp_path):
         # Everything that does not need an external binary or GPU.
         cfg = seed_study(tmp_path, fatsat=True, bright_level=18, bright_side="right",

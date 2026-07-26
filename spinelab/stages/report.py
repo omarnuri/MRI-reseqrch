@@ -56,7 +56,11 @@ def run(ctx: Context) -> StageResult:
     sections: list[str] = []
 
     ingest = ctx.stage_data("ingest")
-    picks = ingest.get("picks", {})
+    picks = ingest.get("picks", {}) or {}
+    if not picks:
+        # Nothing was read. Say so at the top instead of rendering fifteen empty
+        # sections that read like a report with no findings.
+        sections.append(_no_data_section(ctx))
     sections.append(_study_section(ingest, picks))
     sections.append(_fatsat_qc_section(ctx))
     figure = _try_figure(ctx)
@@ -109,6 +113,22 @@ def run(ctx: Context) -> StageResult:
 # --------------------------------------------------------------------------
 # sections
 # --------------------------------------------------------------------------
+
+
+def _no_data_section(ctx: Context) -> str:
+    """Loud banner for a run that never read a study."""
+    result = ctx.results.get("ingest")
+    reason = (result.reason if result else None) or "исследование не прочитано"
+    source = ctx.config.dicom_source or "(не задан)"
+    return (
+        f"{_h2('Прогон не состоялся — данные не прочитаны')}"
+        "<div class='disclaimer'><b>Ниже нет ни одного измерения.</b> Этапы не «не нашли "
+        "патологии» — они вообще не запускались, потому что исследование не было "
+        f"прочитано.<br><br>Причина: <b>{html.escape(str(reason))}</b><br>"
+        f"Путь к данным был: <code>{html.escape(str(source))}</code><br><br>"
+        "Исправьте путь (или ссылку) к архиву DICOM и запустите снова. "
+        "Отсутствие находок в таком прогоне не означает ничего.</div>"
+    )
 
 
 def _study_section(ingest: dict, picks: dict) -> str:
