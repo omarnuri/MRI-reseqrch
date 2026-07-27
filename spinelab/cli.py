@@ -52,6 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("find", help="show which study would be used, and how it was found")
 
+    setup_p = sub.add_parser("setup", help="install and verify the tools the pipeline needs")
+    setup_p.add_argument("--check-only", action="store_true", help="report, change nothing")
+    setup_p.add_argument("--force", action="store_true", help="reinstall even if importable")
+    setup_p.add_argument("--no-segmentation", action="store_true",
+                        help="core I/O only (no GPU stack)")
+    setup_p.add_argument("--no-apt", action="store_true", help="skip apt-get")
+
     deid_p = sub.add_parser("deid", help="write a de-identified copy of a DICOM study")
     deid_p.add_argument("--dicom", required=True)
     deid_p.add_argument("--out", required=True)
@@ -148,6 +155,23 @@ def main(argv: list[str] | None = None) -> int:
 
         print(json.dumps(audit(args.dicom, sample=args.sample), indent=2, ensure_ascii=False))
         return 0
+
+    if args.command == "setup":
+        from .envsetup import check, install
+
+        segmentation = not args.no_segmentation
+        if args.check_only:
+            state = check(segmentation)
+            for module, info in state["modules"].items():
+                print(f" {' ' if info['importable'] else '!'} {module:18s} "
+                      f"{info['detail']}")
+            for binary, path in state["binaries"].items():
+                print(f" {' ' if path else '!'} {binary:18s} {path or 'NOT ON PATH'}")
+            print(f"   GPU: {state['gpu']}")
+            print("ready" if state["ready"] else f"missing: {', '.join(state['missing_modules'])}")
+        else:
+            state = install(segmentation=segmentation, force=args.force, apt=not args.no_apt)
+        return 0 if state["ready"] else 1
 
     if args.command == "find":
         from .discover import discover
