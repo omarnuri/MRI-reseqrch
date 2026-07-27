@@ -183,6 +183,12 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
     # failures and a full report — which reads as success. It happened.
     aborted: str | None = None
 
+    # Once a stage actually re-runs, every later stage's cache is stale: they all
+    # depend, directly or transitively, on what came before. Forcing `ingest` alone
+    # would otherwise leave the downstream markers from the previous run in place and
+    # mix numbers from two different inventories.
+    invalidated = False
+
     for name in config.stages:
         if aborted and name != "report":
             ctx.results[name] = StageResult(
@@ -191,7 +197,8 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
             continue
 
         marker = config.stage_dir / f"{name}.json"
-        if marker.exists() and name not in config.force and name != "report":
+        if marker.exists() and name not in config.force and name != "report" \
+                and not invalidated:
             cached = read_json(marker, {}) or {}
             if cached.get("status") in ("ok", "partial", "cached"):
                 ctx.results[name] = StageResult(
@@ -208,6 +215,9 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
         log(f"[{name:17s}] running…")
         logger.info("=== stage %s: start ===", name)
         runlog.event("stage_start", stage=name)
+        if not invalidated:
+            invalidated = True
+            logger.info("cache invalidated from %s onwards (this stage re-ran)", name)
         t0 = time.time()
         try:
             result = registry[name](ctx)

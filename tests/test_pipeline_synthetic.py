@@ -259,6 +259,17 @@ class TestFullRun:
         # The report is always regenerated, so it can never go stale.
         assert again["report"].status.value == "ok"
 
+    def test_forcing_an_early_stage_invalidates_the_later_caches(self, run):
+        # Forcing `geometry` alone must not leave marrow and posterior reporting
+        # numbers computed against the previous run's inputs.
+        cfg, _ = run
+        cfg.force = ("geometry",)
+        again = run_pipeline(cfg, log=lambda *_: None)
+        cfg.force = ()
+        assert again["geometry"].status.value in ("ok", "partial")
+        for later in ("marrow", "posterior", "radiomics"):
+            assert again[later].status.value != "cached", later
+
 
 class TestWithoutFatSuppression:
     def test_marrow_refuses_instead_of_producing_numbers(self, tmp_path):
