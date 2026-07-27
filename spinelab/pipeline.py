@@ -170,6 +170,11 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
                  cache_dir=str(config.cache_dir) if config.cache_dir else None,
                  quality=config.quality, tta_mirror=config.tta_mirror)
     runlog.log_environment({"spinelab_version": __version__})
+    # The probe above imports the segmentation stack to read its versions, and
+    # `import totalspineseg` overwrites nnUNet_results with a relative path. Reassert
+    # our cache locations so in-process readers see them too; child processes are
+    # covered separately by utils.child_env.
+    config.export_env()
     log(f"log: {log_path}")
 
     registry = _registry()

@@ -38,16 +38,37 @@ def tool_path(name: str) -> str | None:
     return shutil.which(name)
 
 
+#: The cache locations `Config.export_env()` decided on. Kept here, separately from
+#: os.environ, because os.environ is not ours alone: importing `totalspineseg` runs
+#: `os.environ["nnUNet_results"] = './nnUNet_results'` at module level, silently
+#: replacing an absolute cache path with one relative to the current directory. Our
+#: own environment probe imports that module, so the clobbering happened seconds
+#: after we set the variable, and any tool reading it would have written weights into
+#: the working directory instead of the cache.
+_TOOL_ENV: dict[str, str] = {}
+
+
+def set_tool_env(env: dict[str, str]) -> None:
+    """Record the authoritative cache locations. Called by Config.export_env()."""
+    _TOOL_ENV.clear()
+    _TOOL_ENV.update(env)
+
+
 def child_env(**extra: str) -> dict[str, str]:
     """Environment for a tool subprocess.
 
-    `PYTHONIOENCODING` is forced to UTF-8 because these tools print with `rich`,
-    and on a Windows console (cp1251 here) the box-drawing characters in SPINEPS's
+    Built from os.environ, then the recorded cache locations are re-applied on top,
+    so a third-party module that overwrote one of them in this process cannot pass
+    the damage on to the tools.
+
+    `PYTHONIOENCODING` is forced to UTF-8 because these tools print with `rich`, and
+    on a Windows console (cp1251 here) the box-drawing characters in SPINEPS's
     citation banner raise UnicodeEncodeError from an atexit callback. The work is
     already finished by then, but the traceback lands in stderr and becomes the
     "reason" we report for a run that actually succeeded.
     """
     env = dict(os.environ)
+    env.update(_TOOL_ENV)
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.update(extra)
     return env

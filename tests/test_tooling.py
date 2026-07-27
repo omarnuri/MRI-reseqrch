@@ -68,6 +68,42 @@ class TestChildEnv:
         assert child_env()["PYTHONIOENCODING"] == "latin-1"
 
 
+class TestToolEnvSurvivesThirdPartyImports:
+    """`import totalspineseg` runs, at module level:
+
+        os.environ["nnUNet_results"] = './nnUNet_results'
+
+    Our own environment probe imports it to read its version, so the absolute cache
+    path set moments earlier became a path relative to the working directory — and a
+    tool that trusted os.environ would have written its weights into the repository.
+    """
+
+    def test_the_cache_locations_win_over_a_clobbered_environ(self, tmp_path, monkeypatch):
+        from spinelab.config import Config
+
+        config = Config(work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+        exported = config.export_env()
+        expected = exported["nnUNet_results"]
+
+        monkeypatch.setenv("nnUNet_results", "./nnUNet_results")  # what the import does
+        assert child_env()["nnUNet_results"] == expected
+        assert Path(child_env()["nnUNet_results"]).is_absolute()
+
+    def test_explicit_arguments_still_win_over_the_recorded_values(self, tmp_path):
+        from spinelab.config import Config
+
+        Config(work_dir=tmp_path / "work", cache_dir=tmp_path / "cache").export_env()
+        env = child_env(nnUNet_results="/somewhere/deliberate")
+        assert env["nnUNet_results"] == "/somewhere/deliberate"
+
+    def test_unrelated_variables_are_untouched(self, tmp_path, monkeypatch):
+        from spinelab.config import Config
+
+        Config(work_dir=tmp_path / "work", cache_dir=tmp_path / "cache").export_env()
+        monkeypatch.setenv("SOME_USER_VARIABLE", "keep me")
+        assert child_env()["SOME_USER_VARIABLE"] == "keep me"
+
+
 class TestAtexitNoise:
     def test_an_atexit_traceback_is_dropped(self):
         cleaned = strip_atexit_noise(f"real work happened\n{SPINEPS_ATEXIT_NOISE}")

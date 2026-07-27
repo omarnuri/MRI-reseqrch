@@ -13,6 +13,8 @@ import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+from .utils import set_tool_env
+
 DEFAULT_STAGES = (
     "ingest",         # DICOM -> NIfTI + sequence inventory
     "spineps",        # vertebra instances + semantic subregions (posterior elements)
@@ -191,6 +193,11 @@ class Config:
         for path in env.values():
             Path(path).mkdir(parents=True, exist_ok=True)
         os.environ.update(env)
+        # Also recorded outside os.environ: `import totalspineseg` sets
+        # nnUNet_results to a *relative* './nnUNet_results' at module level, so
+        # os.environ stops being a reliable record of this decision the moment
+        # anything probes the stack. See utils.child_env.
+        set_tool_env(env)
         return env
 
     def to_dict(self) -> dict:

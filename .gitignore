@@ -19,3 +19,9 @@ dist/
 
 # Model weights (cached in Google Drive instead)
 weights/
+# `import totalspineseg` points nnUNet_results at a *relative* ./nnUNet_results, so
+# a tool reading it from os.environ writes several hundred MB into the working
+# directory. utils.child_env stops that; this is the second line of defence.
+nnUNet_results/
+nnUNet_raw/
+nnUNet_preprocessed/

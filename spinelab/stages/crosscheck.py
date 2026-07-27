@@ -23,7 +23,7 @@ from .. import labels as L
 from ..analysis import dice
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
-from ..utils import clean_reason, load_canonical, resample_mask_to, write_json
+from ..utils import child_env, clean_reason, load_canonical, resample_mask_to, write_json
 
 TASK = "vertebrae_mr"
 #: Below this, the two models disagree enough that per-level numbers for that
@@ -50,7 +50,7 @@ def run(ctx: Context) -> StageResult:
     out_dir = cfg.intermediate_dir / "crosscheck_vertebrae_mr"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    env = dict(os.environ)
+    env = child_env()
     device = "cpu" if cfg.resolve_device() == "cpu" else "gpu"
     script = (
         "from totalsegmentator.python_api import totalsegmentator\n"

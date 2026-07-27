@@ -28,7 +28,7 @@ from pathlib import Path
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
 from ..runlog import event, get_logger, log_command
-from ..utils import clean_reason
+from ..utils import child_env, clean_reason
 
 log = get_logger(__name__)
 
@@ -51,7 +51,7 @@ def run(ctx: Context) -> StageResult:
     out_dir = cfg.intermediate_dir / "totalsegmentator"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    env = dict(os.environ)
+    env = child_env()
     home = Path(env.get("TOTALSEG_HOME_DIR", cfg.weights_dir / "totalsegmentator"))
     results = home / "nnunet" / "results"
     results.mkdir(parents=True, exist_ok=True)
