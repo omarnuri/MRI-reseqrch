@@ -48,6 +48,23 @@ LOCAL_PATTERNS = (
 SOURCE_FILE = "study_source.txt"
 
 
+def repo_root() -> Path:
+    """The checkout this package is running from."""
+    return Path(__file__).resolve().parent.parent
+
+
+def local_patterns() -> tuple[str, ...]:
+    """Search patterns, Drive first and the source checkout last.
+
+    The checkout is included because the study archive is committed to this
+    repository (which is what docs/PRIVACY.md is about). Finding it there costs a
+    glob; the alternative was the GitHub API fallback below, which downloads the
+    same 36 MB over the network. It is deliberately last, so a copy on Drive — or
+    anything the operator chose explicitly — always wins.
+    """
+    return LOCAL_PATTERNS + (str(repo_root() / "*.zip"),)
+
+
 @dataclass
 class Discovery:
     source: str | None
@@ -86,7 +103,7 @@ def discover(explicit: str | None = None, *, cache_dir: str | Path | None = None
             if value and not is_placeholder(value):
                 return Discovery(value, f"pointer file {pointer}", [])
 
-    for pattern in LOCAL_PATTERNS:
+    for pattern in local_patterns():
         # glob.glob, not Path("/").glob: the latter rejects absolute patterns on
         # Windows outright, so the same code could not be exercised locally.
         matches = sorted(m for m in glob.glob(pattern, recursive=True) if Path(m).is_file())

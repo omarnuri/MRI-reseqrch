@@ -111,6 +111,45 @@ class TestNothingIsGuessed:
         assert found.source.endswith("only.zip")
 
 
+class TestCheckoutFallback:
+    """The archive is committed to this repository, so the checkout is searched too.
+
+    Without this the only way to reach it was the GitHub API lookup, which downloads
+    the same 36 MB over the network — and in Colab the sparse checkout can simply be
+    told to include it.
+    """
+
+    def test_an_archive_in_the_checkout_is_found(self, tmp_path, monkeypatch):
+        import spinelab.discover as mod
+
+        (tmp_path / "study.zip").write_bytes(b"x")
+        monkeypatch.setattr(mod, "repo_root", lambda: tmp_path)
+        monkeypatch.setattr(mod, "LOCAL_PATTERNS", ())
+        found = discover(None, allow_repo_lookup=False)
+        assert found.source.endswith("study.zip")
+
+    def test_drive_wins_over_the_checkout(self, tmp_path, monkeypatch):
+        # A study the operator put on Drive is the one they meant; the copy in the
+        # repository is a historical accident, not a choice.
+        import spinelab.discover as mod
+
+        checkout, drive = tmp_path / "repo", tmp_path / "drive"
+        checkout.mkdir(), drive.mkdir()
+        (checkout / "in-repo.zip").write_bytes(b"x")
+        (drive / "on-drive.zip").write_bytes(b"x")
+        monkeypatch.setattr(mod, "repo_root", lambda: checkout)
+        monkeypatch.setattr(mod, "LOCAL_PATTERNS",
+                            (str(drive / "*.zip").replace("\\", "/"),))
+        assert discover(None, allow_repo_lookup=False).source.endswith("on-drive.zip")
+
+    def test_the_checkout_pattern_is_last(self, monkeypatch):
+        import spinelab.discover as mod
+
+        patterns = mod.local_patterns()
+        assert patterns[:len(mod.LOCAL_PATTERNS)] == mod.LOCAL_PATTERNS
+        assert patterns[-1].endswith("*.zip")
+
+
 class TestRepositoryLookup:
     """These must never touch the network — urlopen is always replaced."""
 
