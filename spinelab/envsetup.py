@@ -36,6 +36,13 @@ SEGMENTATION_PACKAGES = ("nnunetv2>=2.8.1", "SPINEPS>=2.0.0",
                          "totalspineseg>=20260623", "TotalSegmentator>=2.16.0")
 SEGMENTATION_MODULES = ("nnunetv2", "spineps", "totalspineseg", "totalsegmentator")
 
+#: nnunetv2 requires acvl-utils, which ships **no wheel** — every release on PyPI is
+#: an sdist, so pip has to build it. That makes it the most fragile link in the
+#: chain, and it is installed on its own first so a build failure is isolated and
+#: its output is visible instead of being buried in a four-package resolution.
+BUILD_PREREQUISITES = ("setuptools", "wheel")
+FRAGILE_PACKAGES = ("acvl-utils>=0.2.6,<0.3",)
+
 APT_PACKAGES = ("dcm2niix", "unzip")
 #: CLI entry points the pipeline shells out to.
 BINARIES = ("dcm2niix", "spineps", "totalspineseg")
@@ -132,6 +139,13 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
         _pip(CORE_PACKAGES, log, force=force)
 
         if segmentation:
+            log("python: build prerequisites")
+            _pip(BUILD_PREREQUISITES, log)
+            log("python: acvl-utils (source-only, built here so its errors are visible)")
+            if not _pip(FRAGILE_PACKAGES, log, force=force):
+                log("   ! acvl-utils could not be built — nnunetv2 cannot install without it,"
+                    " and the output above is the reason")
+
             log("python: segmentation stack (~5 min)")
             if not _pip(SEGMENTATION_PACKAGES, log, force=force):
                 # One unresolvable dependency must not leave the whole stack
