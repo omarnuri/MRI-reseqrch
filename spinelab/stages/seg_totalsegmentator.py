@@ -28,7 +28,7 @@ from pathlib import Path
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
 from ..runlog import event, get_logger, log_command
-from ..utils import child_env, clean_reason
+from ..utils import child_env, clean_reason, run_tool
 
 log = get_logger(__name__)
 
@@ -81,9 +81,11 @@ def run(ctx: Context) -> StageResult:
     )
     import time as _time
     _t0 = _time.time()
+    tool_log = out_dir.parent / "totalsegmentator_tool.log"
+    log.info("streaming totalsegmentator output to %s", tool_log)
     try:
-        proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                              text=True, timeout=cfg.timeout_ts_s, env=env)
+        proc = run_tool([sys.executable, "-c", script], log_path=tool_log,
+                        timeout=cfg.timeout_ts_s, env=env)
         log_command("totalsegmentator", ["python", "-c", "totalsegmentator(task=total_mr)"],
                     proc, seconds=_time.time() - _t0)
     except subprocess.TimeoutExpired:

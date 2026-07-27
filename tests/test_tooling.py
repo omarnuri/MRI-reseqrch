@@ -68,6 +68,98 @@ class TestChildEnv:
         assert child_env()["PYTHONIOENCODING"] == "latin-1"
 
 
+class TestRunTool:
+    """A run that dies mid-inference has to leave evidence behind.
+
+    With `capture_output=True` the tool's entire output sits in a pipe until it
+    exits. A local SPINEPS run was killed between two model phases after 47 minutes
+    and left no log line, no stage marker and no explanation — the output died with
+    the pipe.
+    """
+
+    def test_output_is_on_disk_before_the_process_exits(self, tmp_path):
+        import subprocess
+        import sys
+
+        log = tmp_path / "tool.log"
+        marker = tmp_path / "seen.txt"
+        # The child writes a line, then waits until the test has read the log —
+        # proving the line is readable while the process is still alive.
+        script = (
+            "import sys, time, pathlib\n"
+            "print('phase 1 done', flush=True)\n"
+            "p = pathlib.Path(sys.argv[1])\n"
+            "for _ in range(200):\n"
+            "    if p.exists(): break\n"
+            "    time.sleep(0.05)\n"
+            "print('phase 2 done', flush=True)\n"
+        )
+        import threading
+
+        from spinelab.utils import run_tool
+
+        def watch():
+            for _ in range(200):
+                if log.exists() and "phase 1 done" in log.read_text(encoding="utf-8"):
+                    marker.write_text("ok", encoding="utf-8")
+                    return
+                import time as t
+                t.sleep(0.05)
+
+        watcher = threading.Thread(target=watch)
+        watcher.start()
+        proc = run_tool([sys.executable, "-c", script, str(marker)],
+                        log_path=log, timeout=60)
+        watcher.join()
+        assert marker.exists(), "the log was not readable until the process had exited"
+        assert proc.returncode == 0
+        assert "phase 1 done" in proc.stdout and "phase 2 done" in proc.stdout
+        assert isinstance(proc, subprocess.CompletedProcess)
+
+    def test_the_command_is_recorded_at_the_top(self, tmp_path):
+        import sys
+
+        from spinelab.utils import run_tool
+
+        log = tmp_path / "tool.log"
+        run_tool([sys.executable, "-c", "pass"], log_path=log, timeout=60)
+        assert log.read_text(encoding="utf-8").startswith("$ ")
+
+    def test_stderr_is_merged_so_the_order_survives(self, tmp_path):
+        import sys
+
+        from spinelab.utils import run_tool
+
+        script = ("import sys\n"
+                  "print('to stdout', flush=True)\n"
+                  "print('to stderr', file=sys.stderr, flush=True)\n")
+        proc = run_tool([sys.executable, "-c", script],
+                        log_path=tmp_path / "tool.log", timeout=60)
+        assert "to stdout" in proc.stdout and "to stderr" in proc.stdout
+        assert proc.stderr == "", "callers read stderr-or-stdout; both must not duplicate"
+
+    def test_a_nonzero_exit_is_reported_with_its_output(self, tmp_path):
+        import sys
+
+        from spinelab.utils import run_tool
+
+        proc = run_tool([sys.executable, "-c", "raise SystemExit(3)"],
+                        log_path=tmp_path / "tool.log", timeout=60)
+        assert proc.returncode == 3
+
+    def test_a_timeout_still_raises_so_the_stage_can_report_it(self, tmp_path):
+        import subprocess
+        import sys
+
+        import pytest as _pytest
+
+        from spinelab.utils import run_tool
+
+        with _pytest.raises(subprocess.TimeoutExpired):
+            run_tool([sys.executable, "-c", "import time; time.sleep(30)"],
+                     log_path=tmp_path / "tool.log", timeout=1)
+
+
 class TestToolEnvSurvivesThirdPartyImports:
     """`import totalspineseg` runs, at module level:
 

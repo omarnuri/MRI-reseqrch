@@ -23,7 +23,8 @@ from .. import labels as L
 from ..analysis import dice
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
-from ..utils import child_env, clean_reason, load_canonical, resample_mask_to, write_json
+from ..utils import (child_env, clean_reason, load_canonical, resample_mask_to, run_tool,
+                     write_json)
 
 TASK = "vertebrae_mr"
 #: Below this, the two models disagree enough that per-level numbers for that
@@ -58,8 +59,8 @@ def run(ctx: Context) -> StageResult:
         f"task={TASK!r}, ml=True, verbose=False, device={device!r})\n"
     )
     try:
-        proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                              text=True, timeout=cfg.timeout_ts_s, env=env)
+        proc = run_tool([sys.executable, "-c", script],
+                        log_path=out_dir / "tool.log", timeout=cfg.timeout_ts_s, env=env)
     except subprocess.TimeoutExpired:
         return StageResult(name="crosscheck", status=Status.FAILED, evidence=Evidence.MODEL,
                            reason=f"timeout after {cfg.timeout_ts_s}s")

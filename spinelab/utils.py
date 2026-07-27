@@ -54,6 +54,33 @@ def set_tool_env(env: dict[str, str]) -> None:
     _TOOL_ENV.update(env)
 
 
+def run_tool(cmd: list[str], *, log_path: str | Path, timeout: int,
+             env: dict[str, str] | None = None):
+    """Run an external tool, streaming its output to a file as it happens.
+
+    `capture_output=True` keeps everything in a pipe until the process exits, which
+    for a CPU segmentation run means no sign of life for an hour — and if the process
+    is then killed, nothing at all. A run that died between two model phases left
+    behind no log line, no stage marker and no explanation.
+
+    So the output goes straight to `log_path`, where it can be watched (`tail -f`)
+    while the tool works, and is read back afterwards for the usual reason parsing.
+    stderr is merged into stdout: interleaved order is what makes a progress log
+    readable, and every caller already treats the two as one.
+    """
+    import subprocess
+
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "w", encoding="utf-8", errors="replace") as fh:
+        fh.write(f"$ {' '.join(str(c) for c in cmd)}\n\n")
+        fh.flush()
+        proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
+                              timeout=timeout, env=env)
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout=text, stderr="")
+
+
 def child_env(**extra: str) -> dict[str, str]:
     """Environment for a tool subprocess.
 

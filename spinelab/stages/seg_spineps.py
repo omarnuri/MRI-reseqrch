@@ -29,7 +29,7 @@ from pathlib import Path
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
 from ..runlog import event, get_logger, log_command
-from ..utils import child_env, clean_reason, find_outputs, tool_path
+from ..utils import child_env, clean_reason, find_outputs, run_tool, tool_path
 
 log = get_logger(__name__)
 
@@ -64,9 +64,10 @@ def run(ctx: Context) -> StageResult:
     log.info("input copy: %s", work_input)
     import time as _time
     _t0 = _time.time()
+    tool_log = out_dir / "tool.log"
+    log.info("streaming spineps output to %s (watch it while it works)", tool_log)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=cfg.timeout_spineps_s, env=env)
+        proc = run_tool(cmd, log_path=tool_log, timeout=cfg.timeout_spineps_s, env=env)
         log_command("spineps", cmd, proc, seconds=_time.time() - _t0)
     except subprocess.TimeoutExpired:
         log.error("spineps timed out after %ss", cfg.timeout_spineps_s)
@@ -170,9 +171,9 @@ def _mirror_consistency(t2_sag: str, semantic_mask: str, out_dir: Path, env: dic
         mirrored_path = mirror_dir / "MIRRORED_DO_NOT_USE_AS_DATA.nii.gz"
         nib.save(nib.Nifti1Image(flipped, src.affine, src.header), str(mirrored_path))
 
-        proc = subprocess.run(_spineps_cmd(mirrored_path, device, executable),
-                              capture_output=True, text=True,
-                              timeout=cfg.timeout_spineps_s, env=env)
+        proc = run_tool(_spineps_cmd(mirrored_path, device, executable),
+                        log_path=mirror_dir / "tool.log",
+                        timeout=cfg.timeout_spineps_s, env=env)
 
         produced = [p for p in find_outputs(mirror_dir, "*spine_msk*.nii.gz", exclude_dirs=())
                     if p != mirrored_path]

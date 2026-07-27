@@ -16,7 +16,7 @@ from pathlib import Path
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
 from ..runlog import event, get_logger, log_command
-from ..utils import child_env, clean_reason, find_outputs, tool_path
+from ..utils import child_env, clean_reason, find_outputs, run_tool, tool_path
 
 log = get_logger(__name__)
 
@@ -53,9 +53,10 @@ def run(ctx: Context) -> StageResult:
     log.info("data dir: %s, device: %s", env["TOTALSPINESEG_DATA"], device)
     import time as _time
     _t0 = _time.time()
+    tool_log = out_dir.parent / "totalspineseg_tool.log"
+    log.info("streaming totalspineseg output to %s", tool_log)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=cfg.timeout_tss_s, env=env)
+        proc = run_tool(cmd, log_path=tool_log, timeout=cfg.timeout_tss_s, env=env)
         log_command("totalspineseg", cmd, proc, seconds=_time.time() - _t0)
     except subprocess.TimeoutExpired:
         log.error("totalspineseg timed out after %ss", cfg.timeout_tss_s)
