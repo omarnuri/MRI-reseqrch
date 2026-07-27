@@ -38,7 +38,7 @@ def _extract_zip(zip_path: Path, target: Path) -> dict:
             "complete": present >= expected}
 
 
-def _run_dcm2niix(dicom_dir: Path, nifti_dir: Path) -> tuple[int, str, str]:
+def _run_dcm2niix(dicom_dir: Path, nifti_dir: Path, *, merge: bool = False) -> tuple[int, str, str]:
     import time
 
     nifti_dir.mkdir(parents=True, exist_ok=True)
@@ -49,8 +49,13 @@ def _run_dcm2niix(dicom_dir: Path, nifti_dir: Path) -> tuple[int, str, str]:
         "-ba", "n",         # keep the sidecar unanonymised so the PHI audit is honest
         "-f", "%p_%s_%d",   # protocol_series_description: unique per series
         "-o", str(nifti_dir),
-        str(dicom_dir),
     ]
+    if merge:
+        # Force one volume per series. Used only as a second pass, when the default
+        # (automatic) behaviour has already split an acquisition and the parts have
+        # been checked to belong to one stack.
+        cmd += ["-m", "y"]
+    cmd.append(str(dicom_dir))
     log.info("converting DICOM -> NIfTI: %s", dicom_dir)
     t0 = time.time()
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -148,19 +153,15 @@ def run(ctx: Context) -> StageResult:
             data={"phi_audit": phi, "extract": extract_info},
         )
 
-    series = []
-    for path in nifti_files:
-        sidecar = Path(str(path).replace(".nii.gz", ".json").replace(".nii", ".json"))
-        meta = read_json(sidecar, {}) or {}
-        img = _load_header(path)
-        series.append(describe_series(
-            meta,
-            path=str(path),
-            name=path.name,
-            shape=img["shape"],
-            voxel_mm=img["zooms"],
-            normal=img["slice_normal"],
-        ))
+    series = [_describe_file(path) for path in nifti_files]
+
+    merged, superseded = _recover_split_series(cfg, dicom_root, series)
+    if merged:
+        # The parts are dropped: keeping them would leave the pipeline free to pick a
+        # half-length volume, and would re-raise the "split acquisition" warning that
+        # the merge has just resolved.
+        superseded_paths = {s.path for s in superseded}
+        series = [s for s in series if s.path not in superseded_paths] + merged
 
     for s in series:
         log.info("series: %-28s %-14s %-9s %3d slices %s",
@@ -197,6 +198,71 @@ def run(ctx: Context) -> StageResult:
         },
         artifacts=[str(cfg.intermediate_dir / "sequence_inventory.json")],
     )
+
+
+def _recover_split_series(cfg, dicom_root: Path, series: list) -> list:
+    """Recover an acquisition that dcm2niix delivered as several volumes.
+
+    This study's axial T2 is one series of 66 slices in the DICOM, but the default
+    conversion emits it as 31 + 35 volumes, and analysing one of them means
+    analysing half the spine. A second pass with `-m y` merges per series; the
+    merged volume is accepted only when it is genuinely the parts put back together:
+    at least as many slices as their sum, the same plane, and matching echo time. A
+    series that really holds two different acquisitions therefore stays split.
+    """
+    from ..sequences import _split_series
+
+    groups = _split_series(series)
+    if not groups:
+        return [], []
+
+    merged_dir = cfg.nifti_dir / "merged"
+    existing = sorted(merged_dir.glob("*.nii.gz")) if merged_dir.exists() else []
+    if not existing:
+        log.warning("dcm2niix split %d acquisition(s); re-converting with -m y to merge",
+                    len(groups))
+        rc, out, err = _run_dcm2niix(dicom_root, merged_dir, merge=True)
+        if rc != 0:
+            log.error("merged conversion failed (rc=%s): %s", rc, clean_reason(err or out))
+            event("problem", stage="ingest", detail="merged re-conversion failed")
+            return [], []
+        existing = sorted(merged_dir.glob("*.nii.gz"))
+
+    candidates = [_describe_file(path) for path in existing]
+    accepted, superseded = [], []
+    for (label, plane), parts in groups.items():
+        want = sum(p.n_slices for p in parts)
+        echo = parts[0].echo_time_ms
+        match = next(
+            (c for c in candidates
+             if c.sequence_label == label and c.plane == plane and c.n_slices >= want
+             and (echo is None or c.echo_time_ms is None
+                  or abs(c.echo_time_ms - echo) < 1.0)),
+            None)
+        if match is None:
+            log.warning("could not merge %s %s — keeping the largest part", plane, label)
+            event("problem", stage="ingest",
+                  detail=f"{plane} {label} stayed split into {len(parts)} volumes")
+            continue
+        match.notes.append(
+            f"merged volume: recovers the {len(parts)} parts dcm2niix produced "
+            f"({', '.join(str(p.n_slices) for p in parts)} slices)")
+        accepted.append(match)
+        superseded += parts
+        log.info("recovered %s %s as a single %d-slice volume", plane, label, match.n_slices)
+        event("series_merged", label=label, plane=plane,
+              parts=[p.n_slices for p in parts], merged_slices=match.n_slices,
+              path=match.path)
+    return accepted, superseded
+
+
+def _describe_file(path: Path):
+    """Series record for one NIfTI file plus its sidecar."""
+    sidecar = Path(str(path).replace(".nii.gz", ".json").replace(".nii", ".json"))
+    header = _load_header(path)
+    return describe_series(read_json(sidecar, {}) or {}, path=str(path), name=path.name,
+                           shape=header["shape"], voxel_mm=header["zooms"],
+                           normal=header["slice_normal"])
 
 
 def _load_header(path: Path) -> dict:

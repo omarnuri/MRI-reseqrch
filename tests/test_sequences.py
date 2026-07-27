@@ -71,10 +71,21 @@ class TestPlane:
                             shape=(15, 320, 320), voxel_mm=(3.3, 0.6, 0.6), normal=[1, 0, 0])
         assert s.plane == PLANE_SAGITTAL
 
-    def test_slice_count_uses_through_plane_axis(self):
-        s = describe_series({"SeriesDescription": "T2 sag"}, path="a.nii.gz", name="a",
-                            shape=(15, 320, 320), voxel_mm=(3.3, 0.6, 0.6), normal=[1, 0, 0])
-        assert s.n_slices == 15
+    def test_slice_count_comes_from_the_third_axis(self):
+        # Real dcm2niix output for this study: 512 x 512 x 17 sagittal. Mapping the
+        # plane to an axis index reported 512 "slices", which then drove selection.
+        s = describe_series({"SeriesDescription": "T2 SAG"}, path="a.nii.gz", name="a",
+                            shape=(512, 512, 17), voxel_mm=(0.66, 0.66, 3.5),
+                            normal=[1, 0, 0])
+        assert s.n_slices == 17
+
+    def test_slice_count_for_a_coronal_stack(self):
+        s = describe_series({"SeriesDescription": "T2 COR STIR", "InversionTime": 100},
+                            path="c.nii.gz", name="c", shape=(512, 512, 23),
+                            voxel_mm=(0.625, 0.625, 4.0), normal=[0, 1, 0])
+        assert s.n_slices == 23
+        assert s.plane == PLANE_CORONAL
+        assert s.fat_sat is True
 
 
 class TestLocalizer:
@@ -146,3 +157,19 @@ class TestPicking:
     def test_build_picks_flags_missing_axial(self):
         picks = build_picks([_series(name="t2sag")])
         assert any("no axial T2" in x for x in picks["limitations"])
+
+    def test_a_split_acquisition_is_reported_not_silently_halved(self):
+        # dcm2niix delivered this study's 66-slice axial series as 31 + 35 volumes.
+        # Picking one of them analyses half the spine, so the split must be stated.
+        parts = [_series(name="ax_a", plane=PLANE_AXIAL, n_slices=31),
+                 _series(name="ax_b", plane=PLANE_AXIAL, n_slices=35)]
+        picks = build_picks([_series(name="t2sag")] + parts)
+        assert picks["T2_AX"] == "ax_b.nii.gz"      # the larger part is used
+        split_note = [x for x in picks["limitations"] if "separate volumes" in x]
+        assert split_note, picks["limitations"]
+        assert "31, 35" in split_note[0] and "35 slices) is analysed" in split_note[0]
+
+    def test_a_single_volume_series_produces_no_split_warning(self):
+        picks = build_picks([_series(name="t2sag"),
+                             _series(name="ax", plane=PLANE_AXIAL, n_slices=66)])
+        assert not any("separate volumes" in x for x in picks["limitations"])

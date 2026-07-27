@@ -248,9 +248,13 @@ def describe_series(meta: dict, *, path: str, name: str, shape, voxel_mm, normal
             notes.append("plane taken from series description (no usable affine)")
     n_slices = 0
     if shape is not None and len(shape) >= 3:
-        # Slice count = extent along the through-plane axis.
-        axis = {PLANE_SAGITTAL: 0, PLANE_CORONAL: 1, PLANE_AXIAL: 2}.get(plane)
-        n_slices = int(shape[axis]) if axis is not None else int(min(shape[:3]))
+        # In a NIfTI the third axis IS the slice axis — the affine's third column is
+        # the step between slices, which is where `normal` came from. Mapping the
+        # plane to an axis index instead (sagittal->0 and so on) assumes canonical
+        # RAS ordering, which raw dcm2niix output does not have: it reported 512
+        # "slices" for a 512x512x17 sagittal stack, and that number then drove
+        # series selection.
+        n_slices = int(shape[2])
     return Series(
         path=str(path),
         name=name,
@@ -346,5 +350,29 @@ def build_picks(series: Sequence[Series], *, min_slices: int = 5) -> dict[str, A
             "no axial T2 — facet joints are frontally oriented in the thoracic spine "
             "and are largely unassessable without an axial (or oblique) plane"
         )
+    # dcm2niix splits one acquisition into several volumes when the slices are not
+    # a single consistent stack (differing echoes, gaps, two slabs). The axial
+    # series of this study comes out as 31 + 35 slices; picking one of them silently
+    # analyses half the spine.
+    for group, members in _split_series(series).items():
+        contrast, plane = group
+        counts = ", ".join(str(m.n_slices) for m in members)
+        chosen = max(members, key=lambda m: m.n_slices)
+        limitations.append(
+            f"the {plane} {contrast} acquisition arrived as {len(members)} separate volumes "
+            f"({counts} slices); only the largest ({chosen.n_slices} slices) is analysed, so "
+            f"part of the covered anatomy is left out")
+
     picks["limitations"] = limitations
     return picks
+
+
+def _split_series(series: Sequence[Series], min_slices: int = 5) -> dict:
+    """Groups of volumes that look like one acquisition split into several files."""
+    groups: dict[tuple[str, str], list[Series]] = {}
+    for s in series:
+        if s.localizer or s.n_slices < min_slices:
+            continue
+        key = (s.sequence_label, s.plane)
+        groups.setdefault(key, []).append(s)
+    return {k: v for k, v in groups.items() if len(v) > 1}
