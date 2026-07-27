@@ -7,6 +7,8 @@ tool was missing, and the pipeline then skipped all sixteen stages.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 import spinelab.envsetup as envsetup
@@ -216,29 +218,53 @@ class TestNumpyConsistency:
         assert state["ready"] is False
         assert state["numpy_problem"] == "numpy.strings: boom"
 
-    def test_the_repair_keeps_the_installed_version(self, monkeypatch):
-        # Moving numpy is what creates mixtures; the fault is the file set, so the
-        # same version is reinstalled to rewrite it.
+    def test_a_numpy_below_the_floor_is_the_reported_problem(self, monkeypatch):
+        """Colab preinstalls 2.0.2, and that alone breaks the stack.
+
+        Verified on an A100 runtime: with 2.0.2, nnU-Net could not resolve a trainer
+        class and SPINEPS was unimportable; `pip install -U 'numpy>=2.1'` turned the
+        same environment from NOT READY into ready.
+        """
+        import types
+
+        monkeypatch.setitem(sys.modules, "numpy",
+                            types.SimpleNamespace(__version__="2.0.2"))
+        problem = envsetup.numpy_problem()
+        assert "2.0.2" in problem
+        assert "2.1" in problem
+
+    def test_a_numpy_above_the_floor_is_accepted(self, monkeypatch):
+        import types
+
+        monkeypatch.setitem(sys.modules, "numpy",
+                            types.SimpleNamespace(__version__="2.5.1"))
+        # The submodule check still runs against the real numpy on this machine.
+        assert envsetup.numpy_problem() == ""
+
+    def test_the_repair_moves_numpy_forward(self, monkeypatch):
+        # An earlier version of this reinstalled the *same* version, on the theory
+        # that the file set was mixed rather than old. That was wrong: both symptoms
+        # are one cause — numpy too old for packages built against 2.1+.
         seen: list[list[str]] = []
         monkeypatch.setattr(envsetup, "_run", lambda cmd, log: seen.append(cmd) or True)
         assert envsetup.repair_numpy(lambda *_: None) is True
-        import numpy
-
         joined = " ".join(seen[0])
-        assert f"numpy=={numpy.__version__}" in joined
-        assert "--force-reinstall" in joined
-        assert "--no-deps" in joined, "repairing numpy must not drag its dependents along"
+        assert envsetup.NUMPY_REQUIREMENT in joined
+        assert "--no-deps" in joined, "a numpy move must not drag its dependents along"
+        assert "--force-reinstall" not in joined, (
+            "pip should be free to leave an already-adequate numpy alone")
 
     def test_the_repair_runs_before_the_stack_is_installed(self, monkeypatch):
         order: list[str] = []
         monkeypatch.setattr(envsetup, "_run",
                             lambda cmd, log: order.append(" ".join(cmd)) or True)
-        monkeypatch.setattr(envsetup, "numpy_problem", lambda: "numpy.strings: boom")
+        monkeypatch.setattr(envsetup, "numpy_problem", lambda: "numpy 2.0.2 is too old")
         monkeypatch.setattr(envsetup, "acvl_symbols", lambda: [])
         envsetup.install(segmentation=True, apt=False, log=lambda *_: None)
-        numpy_at = next(i for i, c in enumerate(order) if "numpy==" in c)
+        numpy_at = next(i for i, c in enumerate(order)
+                        if envsetup.NUMPY_REQUIREMENT in c)
         stack_at = next(i for i, c in enumerate(order) if "nnunetv2" in c)
-        assert numpy_at < stack_at, "the stack must not be installed onto a broken numpy"
+        assert numpy_at < stack_at, "the stack must not be built onto an old numpy"
 
     def test_a_repair_demands_a_restart_before_the_pipeline(self, monkeypatch):
         monkeypatch.setattr(envsetup, "_run", lambda cmd, log: True)
@@ -260,9 +286,11 @@ class TestNumpyConsistency:
         lines: list[str] = []
         envsetup.install(segmentation=True, apt=False, log=lines.append)
         text = "\n".join(lines)
-        assert "more than one version" in text
         assert "_center" in text
-        assert "SPINEPS and TotalSpineSeg" in text
+        assert envsetup.NUMPY_REQUIREMENT in text
+        assert "Restart session" in text, (
+            "numpy was already imported when the upgrade landed, so the live module "
+            "object is stale until the kernel restarts — the reader has to be told")
 
 
 class TestSmokeTest:

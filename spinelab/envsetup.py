@@ -172,9 +172,44 @@ def nnunet_problem() -> str:
 #: in Colab's dist-packages, so any version movement can leave exactly this mixture.
 NUMPY_CONSISTENCY_MODULES = ("numpy._core.strings", "numpy.strings")
 
+#: Colab preinstalls numpy 2.0.2 and this stack needs newer. Verified on an A100
+#: runtime: with 2.0.2 nnU-Net cannot resolve a trainer class —
+#:
+#:     AttributeError: module 'numpy._core._multiarray_umath' has no attribute ...
+#:
+#: and SPINEPS and TotalSpineSeg are unimportable. A single `pip install -U
+#: 'numpy>=2.1'` turned that environment from NOT READY into ready.
+#:
+#: This supersedes an earlier reading of the same fault. The `_center` ImportError
+#: looked like numpy's own files coming from two versions, and the response was to
+#: reinstall the *same* version. That was wrong: both messages are the one cause —
+#: numpy too old for packages built against 2.1+ — and the fix is to move forward.
+#: Upgrading is also the safe direction, since numpy 2.0's ABI is forward compatible;
+#: it is downgrading that breaks compiled extensions.
+NUMPY_FLOOR = (2, 1)
+NUMPY_REQUIREMENT = "numpy>=2.1"
+
 
 def numpy_problem() -> str:
-    """Empty string when numpy's file set is self-consistent, else the reason."""
+    """Empty string when numpy is new enough and self-consistent, else the reason."""
+    try:
+        import numpy
+    except Exception as exc:  # noqa: BLE001
+        return f"numpy cannot be imported: {exc}"[:200]
+
+    parts = []
+    for chunk in str(numpy.__version__).split(".")[:2]:
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    if tuple(parts) < NUMPY_FLOOR:
+        floor = ".".join(str(n) for n in NUMPY_FLOOR)
+        return (f"numpy {numpy.__version__} is older than {floor}; nnU-Net and SPINEPS "
+                f"are built against newer numpy and fail with attribute errors inside "
+                f"numpy._core")
+
+    # A version new enough can still be a mixed file set — pip cannot cleanly
+    # uninstall the numpy preinstalled in Colab's dist-packages, so a half-applied
+    # upgrade leaves submodules from two versions that refuse to import together.
     for module in NUMPY_CONSISTENCY_MODULES:
         try:
             importlib.import_module(module)
@@ -186,24 +221,15 @@ def numpy_problem() -> str:
 
 
 def repair_numpy(log) -> bool:
-    """Rewrite numpy's files at the version already installed.
+    """Move numpy to a version this stack can actually be built against.
 
-    Reinstalling the *same* version on purpose: the fault is a mixed file set, not a
-    wrong version, and moving numpy is what produces mixtures in the first place.
-    Colab pins 2.0.2 deliberately and every package in this stack accepts it.
+    `--no-deps` so that nothing else is dragged along by a numpy upgrade, and no
+    `--force-reinstall`: pip should be free to leave an already-adequate numpy alone.
     """
-    try:
-        import numpy
-
-        version = numpy.__version__
-    except Exception as exc:  # noqa: BLE001
-        log(f"   ! numpy cannot be imported at all: {exc}")
-        return False
-
-    log(f"   repairing numpy {version} in place (mixed file set, not a wrong version)")
-    ok = _pip([f"numpy=={version}"], log, force=True, no_deps=True)
+    log(f"   installing {NUMPY_REQUIREMENT} (Colab preinstalls 2.0.2, which is too old)")
+    ok = _pip([NUMPY_REQUIREMENT], log, no_deps=True)
     if not ok:
-        log("   ! numpy could not be reinstalled — the output above says why")
+        log("   ! numpy could not be upgraded — the output above says why")
     return ok
 
 
@@ -400,14 +426,15 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
     if state["numpy_problem"]:
         log("")
         log("=" * 70)
-        log("numpy's own files come from more than one version:")
+        log("numpy is still not usable by this stack:")
         log(f"    {state['numpy_problem']}")
-        log("  This is what makes SPINEPS and TotalSpineSeg unimportable while nnU-Net")
-        log("  looks fine. pip cannot cleanly uninstall the numpy preinstalled in")
-        log("  Colab's dist-packages, so any version movement can leave this mixture.")
+        log(f"  {NUMPY_REQUIREMENT} was installed above; if this line is still here the")
+        log("  upgrade did not take effect in this process.")
         log("  Fix, in this order:")
-        log("    1) Runtime -> Restart session, then run this cell again.")
-        log("    2) If it survives a restart, set FORCE_REINSTALL and run again.")
+        log("    1) Runtime -> Restart session, then run this cell again. numpy was")
+        log("       already imported when the upgrade landed, so the old module object")
+        log("       is still live in this kernel.")
+        log("    2) If it survives a restart, the pip output above names the reason.")
         log("=" * 70)
 
     if state.get("restart_required"):
