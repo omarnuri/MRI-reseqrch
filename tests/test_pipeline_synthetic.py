@@ -206,6 +206,42 @@ class TestFullRun:
             assert 7.0 <= v["posterior_height_mm"] <= 9.0
             assert 7.0 <= v["anterior_height_mm"] <= 9.0
 
+    def test_a_level_clipped_by_the_field_of_view_is_flagged(self, run):
+        """C7 on the real study: posterior height 1.99 mm, wedge -19.5 degrees.
+
+        It sat at the top edge of the sagittal stack, so it had no measurable height.
+        The sign happened to keep it out of the maximum; clipping at the other end of
+        the stack would have made it the headline deformity instead.
+        """
+        _, results = run
+        for v in results["geometry"].data["per_vertebra"]:
+            assert "truncated" in v, "every level has to declare whether it is clipped"
+
+    def test_clipped_levels_are_kept_out_of_the_wedge_statistics(self):
+        import numpy as np
+
+        from spinelab.stages.geometry import _touches_boundary
+
+        # A body sitting against the superior face of the volume.
+        clipped = np.zeros((8, 12, 12), dtype=bool)
+        clipped[2:6, 3:9, 8:] = True
+        assert _touches_boundary(clipped) is True
+
+        interior = np.zeros((8, 12, 12), dtype=bool)
+        interior[2:6, 3:9, 4:8] = True
+        assert _touches_boundary(interior) is False
+
+    def test_reaching_both_slice_edges_is_not_truncation(self):
+        # A sagittal stack is only a few centimetres wide, so a vertebral body
+        # legitimately spans every slice. Flagging that would exclude every level.
+        import numpy as np
+
+        from spinelab.stages.geometry import _touches_boundary
+
+        spans_slices = np.zeros((6, 12, 12), dtype=bool)
+        spans_slices[:, 3:9, 4:8] = True
+        assert _touches_boundary(spans_slices) is False
+
     def test_marrow_finds_the_planted_level(self, run):
         _, results = run
         data = results["marrow"].data
@@ -385,6 +421,40 @@ class TestFacetsAxial:
             if joint.get("comparable"):
                 sides = joint["sides"]
                 assert sides["right"]["bright_fraction"] > sides["left"]["bright_fraction"]
+
+    def test_a_handful_of_bright_voxels_is_not_a_side_difference(self):
+        """The real run's headline was three joints at "200% difference".
+
+        `asymmetry_ratio` returns diff_pct=200 when one side is zero, and on the real
+        axial series that came from counts like 0 against 3 out of ~500 voxels — the
+        noise a median+3*sigma threshold produces. Ranked by diff_pct, those
+        saturated values outranked everything real.
+        """
+        from spinelab.stages.facets_axial import MIN_BRIGHT_VOXELS, _above_noise_floor
+
+        assert _above_noise_floor({"bright_voxels": 0}, {"bright_voxels": 3}) is False
+        assert _above_noise_floor({"bright_voxels": 0}, {"bright_voxels": 0}) is False
+        assert _above_noise_floor({"bright_voxels": 13}, {"bright_voxels": 0}) is True
+        assert _above_noise_floor({"bright_voxels": MIN_BRIGHT_VOXELS},
+                                  {"bright_voxels": 0}) is True
+
+    def test_a_saturated_ratio_never_becomes_the_headline(self, tmp_path):
+        # End to end on a phantom with no bright signal at all: the joints are still
+        # measured and reported, but nothing is ranked, and the verdict says why.
+        _, results = self._run(tmp_path)
+        data = results["facets_axial"].data
+        for entry in data["largest_side_difference"]:
+            assert entry["diff_pct"] != 200.0, (
+                "200% is the value for 'one side is zero', not a measured difference")
+            assert max(entry["bright_voxels"].values()) >= data["min_bright_voxels"]
+
+    def test_the_verdict_distinguishes_absent_evidence_from_a_negative(self, tmp_path):
+        _, results = self._run(tmp_path)
+        data = results["facets_axial"].data
+        verdict = data["side_difference_verdict"]
+        assert "n_above_noise_floor" in data
+        if data["n_above_noise_floor"] == 0:
+            assert "not a negative finding" in verdict
 
     def test_symmetric_phantom_shows_no_side_preference(self, tmp_path):
         _, results = self._run(tmp_path)

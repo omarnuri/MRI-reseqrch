@@ -78,8 +78,23 @@ def run(ctx: Context) -> StageResult:
         )
 
     step2 = [p for p in outputs if "step2" in str(p).lower()]
+    # Files on disk are not the same thing as a finished run. This reported OK on a
+    # run that exited rc=1 partway through, and the missing labels then showed up two
+    # stages later as "no canal segmentation" and "no volume containing a cord label"
+    # — symptoms of a failure that had already been recorded and ignored here.
+    partial = proc.returncode != 0 or not step2
+    reason = None
+    if proc.returncode != 0:
+        reason = (f"totalspineseg exited rc={proc.returncode} after writing "
+                  f"{len(outputs)} volume(s) — the output is incomplete: "
+                  f"{clean_reason(proc.stdout)}")
+    elif not step2:
+        reason = ("no step2 output — only the coarse first-pass labels are available, "
+                  "so cord, canal and disc labels may be missing")
     return StageResult(
-        name="totalspineseg", status=Status.OK, evidence=Evidence.MODEL,
+        name="totalspineseg",
+        status=Status.PARTIAL if partial else Status.OK,
+        evidence=Evidence.MODEL, reason=reason,
         data={
             "outputs": [str(p) for p in outputs],
             "step2_outputs": [str(p) for p in step2],

@@ -90,6 +90,7 @@ def run(ctx: Context) -> StageResult:
             "voxel_count": voxels,
             "volume_mm3": round(voxels * ap_mm * si_mm * float(zooms[0]), 1),
             "body_based": body_based,
+            "truncated": _touches_boundary(body),
         }
         heights = body_heights(body)
         if heights is not None:
@@ -110,7 +111,21 @@ def run(ctx: Context) -> StageResult:
         raise SkipStage("instance mask contains no vertebra large enough to measure")
 
     thoracic = [r for r in per_vertebra if r["label_id"] in L.THORACIC_LABELS]
-    wedges = [r.get("wedge_angle_deg") for r in per_vertebra]
+
+    # A vertebra clipped by the edge of the field of view has no measurable height.
+    # On the real study C7 sat at the top edge and came out with a posterior height of
+    # 1.99 mm against 13.28 mm anteriorly — a wedge of -19.5 degrees. It happened to
+    # be negative and so did not become the maximum, but the same clipping at the
+    # bottom of the stack would have produced a large positive wedge and headlined the
+    # report as a deformity. The level stays in the table, flagged, and is kept out of
+    # every number derived from heights.
+    intact = [r for r in per_vertebra if not r.get("truncated")]
+    truncated_levels = [r["name"] for r in per_vertebra if r.get("truncated")]
+    if truncated_levels:
+        notes.append(
+            f"excluded from wedge statistics — clipped by the edge of the field of "
+            f"view, so their heights are not measurable: {', '.join(truncated_levels)}")
+    wedges = [r.get("wedge_angle_deg") for r in intact]
     run_len = longest_run(wedges, lambda w: w is not None and w >= cfg.wedge_scheuermann_deg)
 
     # Centroids are computed from the canonical instance mask, not read from the
@@ -155,6 +170,25 @@ def run(ctx: Context) -> StageResult:
     write_json(cfg.intermediate_dir / "geometry.json", payload)
     return StageResult(name="geometry", status=Status.OK, evidence=Evidence.MEASUREMENT,
                        data=payload)
+
+
+def _touches_boundary(mask: np.ndarray) -> bool:
+    """Is this body clipped by the edge of the volume?
+
+    Only the anterior-posterior and superior-inferior faces are checked (canonical
+    axes 1 and 2). Those are the two directions the height and AP-width measurements
+    span. The left-right faces are not: a sagittal stack is only a few centimetres
+    wide in the slice direction, so a vertebral body legitimately reaches both edges
+    there, and flagging that would exclude every level.
+    """
+    if mask.ndim != 3 or not mask.any():
+        return False
+    for axis in (1, 2):
+        first = mask.take(0, axis=axis)
+        last = mask.take(mask.shape[axis] - 1, axis=axis)
+        if first.any() or last.any():
+            return True
+    return False
 
 
 def _centroids_from_mask(inst: np.ndarray, zooms) -> dict[int, np.ndarray]:

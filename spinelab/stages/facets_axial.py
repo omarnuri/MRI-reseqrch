@@ -117,8 +117,15 @@ def run(ctx: Context) -> StageResult:
                                                   right["median_signal"] or 0.0),
             }
             entry["comparable"] = _coverage_ok(left, right)
+            entry["above_noise_floor"] = _above_noise_floor(left, right)
+            if not entry["above_noise_floor"]:
+                entry["comparison"]["bright_fraction"]["note"] = (
+                    f"too few bright voxels to compare "
+                    f"({left['bright_voxels']} left, {right['bright_voxels']} right; "
+                    f"at least {MIN_BRIGHT_VOXELS} on one side is required)")
         else:
             entry["comparable"] = False
+            entry["above_noise_floor"] = False
         joints.append(entry)
 
     measurable = [j for j in joints if j.get("comparable")]
@@ -131,8 +138,14 @@ def run(ctx: Context) -> StageResult:
                   "threshold_reference": reference_name},
         )
 
+    # Rank only joints whose bright-voxel counts are large enough to be compared.
+    # Without this the headline was three joints at "200% difference" — the value
+    # `asymmetry_ratio` returns when one side is zero — produced by counts like 0
+    # against 3 out of ~500 voxels. That is the noise a 3-sigma threshold makes, and
+    # it was outranking every real difference.
+    rankable = [j for j in measurable if j.get("above_noise_floor")]
     ranked = sorted(
-        measurable,
+        rankable,
         key=lambda j: -(j["comparison"]["bright_fraction"].get("diff_pct") or 0.0),
     )
     payload = {
@@ -144,12 +157,23 @@ def run(ctx: Context) -> StageResult:
         "threshold_k_sigma": cfg.posterior_reference_k,
         "joints": joints,
         "n_comparable": len(measurable),
+        "n_above_noise_floor": len(rankable),
+        "min_bright_voxels": MIN_BRIGHT_VOXELS,
         "largest_side_difference": [
             {"joint": j["joint"],
              "higher_side": j["comparison"]["bright_fraction"]["higher_side"],
-             "diff_pct": j["comparison"]["bright_fraction"]["diff_pct"]}
+             "diff_pct": j["comparison"]["bright_fraction"]["diff_pct"],
+             "bright_voxels": {"left": j["sides"]["left"]["bright_voxels"],
+                               "right": j["sides"]["right"]["bright_voxels"]}}
             for j in ranked[:3]
         ],
+        "side_difference_verdict": (
+            f"no facet joint has enough bright voxels to compare sides "
+            f"(fewer than {MIN_BRIGHT_VOXELS} on both sides everywhere) — on this "
+            f"series that is the expected result, not a negative finding"
+            if not rankable else
+            f"{len(rankable)} of {len(measurable)} joints have comparable bright-voxel "
+            f"counts"),
         "interpretation_limits": [
             "Bright signal on T2 inside a facet joint interface is consistent with fluid, "
             "but degenerative change, partial-volume averaging with CSF or vessels, and "
@@ -167,6 +191,18 @@ def run(ctx: Context) -> StageResult:
     write_json(cfg.intermediate_dir / "facets_axial.json", payload)
     return StageResult(name="facets_axial", status=Status.OK, evidence=Evidence.HEURISTIC,
                        data=payload)
+
+
+#: Bright voxels needed on at least one side before the two sides may be compared.
+#: The threshold is median + 3*sigma_MAD of reference marrow, so on a region of a few
+#: hundred voxels a handful of voxels above it is what chance produces — for a normal
+#: distribution about 0.13%, i.e. under one voxel in 500. Counts of 0 against 3 are
+#: therefore indistinguishable from noise, and comparing them yielded "200%".
+MIN_BRIGHT_VOXELS = 10
+
+
+def _above_noise_floor(left: dict, right: dict) -> bool:
+    return max(left.get("bright_voxels") or 0, right.get("bright_voxels") or 0) >= MIN_BRIGHT_VOXELS
 
 
 def _coverage_ok(left: dict, right: dict, min_coverage: float = 0.8,

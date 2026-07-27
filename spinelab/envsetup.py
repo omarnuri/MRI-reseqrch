@@ -131,6 +131,35 @@ def acvl_symbols() -> list[str]:
     return missing
 
 
+#: Packages that Colab preinstalls at a version too old for this stack, where the
+#: declaring package asks for them without a floor — so pip sees the requirement
+#: satisfied and leaves the old build in place. The failure then surfaces deep inside
+#: inference rather than at install time:
+#:
+#:     nnunetv2/.../nnUNetTrainerDAExt.py -> auglab.transforms.gpu -> kornia
+#:     ImportError: cannot import name 'Tensor' from 'kornia.core'
+#:
+#: `auglab` requires bare "kornia". That killed TotalSegmentator (and with it the
+#: muscle, fat-suppression and second-opinion stages) after the models had already
+#: loaded. Verified working at kornia 0.8.3.
+STALE_ON_COLAB = ("kornia>=0.8",)
+
+#: The call that actually failed. Importing `nnunetv2` succeeds; resolving a trainer
+#: class is what walks into auglab and kornia, so that is what has to be checked.
+#: A top-level import check would have called this environment healthy.
+def nnunet_problem() -> str:
+    """Empty string when nnU-Net can resolve a trainer class, else the reason."""
+    try:
+        from nnunetv2.utilities.find_objects import recursive_find_trainer_class_by_name
+    except Exception as exc:  # noqa: BLE001 — reported separately as a missing module
+        return ""
+    try:
+        recursive_find_trainer_class_by_name("nnUNetTrainer")
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"[:200]
+    return ""
+
+
 #: Submodules that only import cleanly when numpy's own file set is from one
 #: version. This is not a hypothetical: on Colab
 #:
@@ -225,8 +254,10 @@ def check(segmentation: bool = True, *, smoke: bool = False) -> dict:
     smoke_results = smoke_test(binaries) if smoke else {}
     crashing = [name for name, verdict in smoke_results.items() if verdict != "ok"]
     numpy_broken = numpy_problem()
+    nnunet_broken = nnunet_problem() if segmentation and modules["nnunetv2"][0] else ""
     return {
         "numpy_problem": numpy_broken,
+        "nnunet_problem": nnunet_broken,
         "modules": {m: {"importable": ok, "detail": detail} for m, (ok, detail) in modules.items()},
         "binaries": binaries,
         "missing_modules": missing,
@@ -236,7 +267,7 @@ def check(segmentation: bool = True, *, smoke: bool = False) -> dict:
         "missing_acvl_symbols": broken,
         "smoke": smoke_results,
         "crashing_binaries": crashing,
-        "ready": not missing and not broken and not crashing and not numpy_broken,
+        "ready": not (missing or broken or crashing or numpy_broken or nnunet_broken),
         "gpu": _gpu_line(),
     }
 
@@ -305,6 +336,9 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
                 log("   ! acvl-utils could not be built — nothing below can install"
                     " without it, and the output above is the reason")
 
+            log(f"python: {', '.join(STALE_ON_COLAB)} (declared without a floor upstream)")
+            _pip(STALE_ON_COLAB, log, force=force)
+
             log("python: nnU-Net, TotalSpineSeg, TotalSegmentator (~5 min)")
             if not _pip(SEGMENTATION_PACKAGES, log, force=force):
                 # One unresolvable dependency must not leave the whole stack
@@ -349,6 +383,18 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
         log("  A missing import here usually means SPINEPS_DEPS is out of date —")
         log("  SPINEPS is installed with --no-deps, so that list is the only thing")
         log("  supplying its dependencies. Add the named package to it.")
+        log("=" * 70)
+
+    if state.get("nnunet_problem"):
+        log("")
+        log("=" * 70)
+        log("nnunetv2 imports, but cannot resolve a trainer class:")
+        log(f"    {state['nnunet_problem']}")
+        log("  Every nnU-Net-based tool loads its models through this call, so this")
+        log("  fails after the weights are already loaded — TotalSegmentator and")
+        log("  TotalSpineSeg die mid-inference, not at import.")
+        log(f"  Usually a stale preinstalled package: {', '.join(STALE_ON_COLAB)} are")
+        log("  declared upstream without a version floor. Re-run with FORCE_REINSTALL.")
         log("=" * 70)
 
     if state["numpy_problem"]:
