@@ -53,17 +53,10 @@ def run(ctx: Context) -> StageResult:
     models_dir = os.environ.get("SPINEPS_SEGMENTOR_MODELS", str(cfg.weights_dir / "spineps"))
     Path(models_dir).mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        "spineps", "sample",
-        "-ignore_bids_filter",
-        "-ignore_inference_compatibility",
-        "-i", str(work_input),
-        "-der_name", "derivatives_seg",
-        "-model_semantic", "t2w",
-        "-model_instance", "instance",
-        "-model_labeling", "t2w_labeling",
-    ]
+    device = cfg.resolve_device()
+    cmd = _spineps_cmd(work_input, device)
     env = dict(os.environ, SPINEPS_SEGMENTOR_MODELS=models_dir)
+    log.info("device: %s", device)
     log.info("models dir: %s (%d entries)", models_dir,
              len(list(Path(models_dir).glob('*'))) if Path(models_dir).exists() else 0)
     log.info("input copy: %s", work_input)
@@ -113,12 +106,13 @@ def run(ctx: Context) -> StageResult:
         "semantic_masks": [str(p) for p in semantic_masks],
         "centroid_files": [str(p) for p in centroids],
         "models_dir": models_dir,
+        "device": device,
         "version": _spineps_version(),
     }
 
     if cfg.quality and cfg.tta_mirror and semantic_masks:
         data["mirror_consistency"] = _mirror_consistency(
-            t2_sag, semantic_masks[0], out_dir, env, cfg)
+            t2_sag, semantic_masks[0], out_dir, env, cfg, device)
 
     return StageResult(
         name="spineps", status=status, evidence=Evidence.MODEL, reason=reason,
@@ -127,7 +121,26 @@ def run(ctx: Context) -> StageResult:
     )
 
 
-def _mirror_consistency(t2_sag: str, semantic_mask: str, out_dir: Path, env: dict, cfg) -> dict:
+def _spineps_cmd(image: Path, device: str) -> list[str]:
+    """The `spineps sample` invocation. `-cpu` is not optional off a GPU host:
+    without it SPINEPS loads its models onto CUDA and dies on `torch.cuda`."""
+    cmd = [
+        "spineps", "sample",
+        "-ignore_bids_filter",
+        "-ignore_inference_compatibility",
+        "-i", str(image),
+        "-der_name", "derivatives_seg",
+        "-model_semantic", "t2w",
+        "-model_instance", "instance",
+        "-model_labeling", "t2w_labeling",
+    ]
+    if device == "cpu":
+        cmd.append("-cpu")
+    return cmd
+
+
+def _mirror_consistency(t2_sag: str, semantic_mask: str, out_dir: Path, env: dict, cfg,
+                        device: str) -> dict:
     """Is the model's LEFT/RIGHT assignment stable under mirroring?
 
     Run the segmenter again on a left-right mirrored copy of the study, mirror the
@@ -155,12 +168,8 @@ def _mirror_consistency(t2_sag: str, semantic_mask: str, out_dir: Path, env: dic
         mirrored_path = mirror_dir / "MIRRORED_DO_NOT_USE_AS_DATA.nii.gz"
         nib.save(nib.Nifti1Image(flipped, src.affine, src.header), str(mirrored_path))
 
-        proc = subprocess.run(
-            ["spineps", "sample", "-ignore_bids_filter", "-ignore_inference_compatibility",
-             "-i", str(mirrored_path), "-der_name", "derivatives_seg",
-             "-model_semantic", "t2w", "-model_instance", "instance",
-             "-model_labeling", "t2w_labeling"],
-            capture_output=True, text=True, timeout=cfg.timeout_spineps_s, env=env)
+        proc = subprocess.run(_spineps_cmd(mirrored_path, device), capture_output=True,
+                              text=True, timeout=cfg.timeout_spineps_s, env=env)
 
         produced = [p for p in find_outputs(mirror_dir, "*spine_msk*.nii.gz", exclude_dirs=())
                     if p != mirrored_path]

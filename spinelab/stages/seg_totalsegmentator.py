@@ -70,10 +70,14 @@ def run(ctx: Context) -> StageResult:
             data={"weights": weights, "weights_dir": str(results)},
         )
 
+    # `device` is passed explicitly: the default is "gpu", and on a host without
+    # CUDA that fails inside nnU-Net rather than falling back.
+    device = "cpu" if cfg.resolve_device() == "cpu" else "gpu"
+    log.info("device: %s", device)
     script = (
         "from totalsegmentator.python_api import totalsegmentator\n"
         f"totalsegmentator(input={str(t2_sag)!r}, output={str(out_dir)!r}, "
-        "task='total_mr', ml=False, verbose=False)\n"
+        f"task='total_mr', ml=False, verbose=False, device={device!r})\n"
     )
     import time as _time
     _t0 = _time.time()
@@ -116,6 +120,7 @@ def run(ctx: Context) -> StageResult:
             "muscle_pairs": muscle_pairs,
             "reference_image": str(t2_sag),
             "weights_dir": str(results),
+            "device": device,
         },
         artifacts=[v["left"] for v in muscle_pairs.values()][:5],
     )

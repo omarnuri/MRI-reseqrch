@@ -38,7 +38,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--skip", default=None, help="comma-separated stages to leave out")
     run_p.add_argument("--force", default=None,
                        help="comma-separated stages to re-run even if cached")
-    run_p.add_argument("--no-gpu", action="store_true", help="allow running without a GPU")
+    run_p.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
+                       help="where the segmentation models run. cpu is ~10x slower but "
+                            "makes the whole pipeline runnable off a GPU host")
+    run_p.add_argument("--no-gpu", action="store_true",
+                       help="alias for --device cpu (this flag previously did nothing)")
+    run_p.add_argument("--timeout", type=int, default=None,
+                       help="per-segmentation-tool timeout in seconds (default 2400; "
+                            "raise it for --device cpu)")
     run_p.add_argument("--quality", action="store_true",
                        help="spend GPU time on reliability: independent cross-check model "
                             "and mirror TTA (for an A100-class GPU)")
@@ -208,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(deidentify(args.dicom, args.out), indent=2, ensure_ascii=False))
         return 0
 
+    timeouts = ({"timeout_spineps_s": args.timeout, "timeout_tss_s": args.timeout,
+                 "timeout_ts_s": args.timeout} if args.timeout else {})
     config = Config(
         dicom_source=args.dicom,
         subject_id=args.subject,
@@ -215,9 +224,10 @@ def main(argv: list[str] | None = None) -> int:
         cache_dir=Path(args.cache) if args.cache else None,
         stages=_stage_list(args.only, args.skip),
         force=tuple(s.strip() for s in (args.force or "").split(",") if s.strip()),
-        gpu_required=not args.no_gpu,
+        device="cpu" if args.no_gpu else args.device,
         quality=args.quality,
         tta_mirror=args.tta_mirror,
+        **timeouts,
     )
     results = run_pipeline(config)
     failed = [n for n, r in results.items() if r.status.value == "failed"]

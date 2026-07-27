@@ -51,10 +51,11 @@ def run(ctx: Context) -> StageResult:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     env = dict(os.environ)
+    device = "cpu" if cfg.resolve_device() == "cpu" else "gpu"
     script = (
         "from totalsegmentator.python_api import totalsegmentator\n"
         f"totalsegmentator(input={str(t2_sag)!r}, output={str(out_dir)!r}, "
-        f"task={TASK!r}, ml=True, verbose=False)\n"
+        f"task={TASK!r}, ml=True, verbose=False, device={device!r})\n"
     )
     try:
         proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
@@ -109,6 +110,7 @@ def run(ctx: Context) -> StageResult:
     payload = {
         "second_model": f"TotalSegmentator task {TASK}",
         "mask_file": str(produced[0]),
+        "device": device,
         "levels": rows,
         "mean_dice": round(float(np.mean(scored)), 3) if scored else None,
         "dice_threshold": RELIABLE_DICE,

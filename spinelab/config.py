@@ -56,7 +56,17 @@ class Config:
     force: tuple[str, ...] = ()
     """Stages to re-run even if a completed marker exists."""
 
-    gpu_required: bool = True
+    device: str = "auto"
+    """Where the segmentation models run: "auto", "cuda" or "cpu".
+
+    This used to be a `gpu_required` flag that was assigned and never read, so
+    `--no-gpu` changed nothing; the segmentation stages skipped only because the
+    CLIs were absent, which looked like the same thing and is not. Now the choice
+    reaches the tools: SPINEPS gets `-cpu`, TotalSegmentator gets `device=`, and a
+    CPU run is slow but real — which is what makes the pipeline debuggable off a
+    GPU host at all.
+    """
+
     timeout_spineps_s: int = 2400
     timeout_tss_s: int = 2400
     timeout_ts_s: int = 2400
@@ -129,6 +139,25 @@ class Config:
         """Where model weights live. Drive-backed when cache_dir is set."""
         base = self.cache_dir or self.work_dir
         return Path(base) / "weights"
+
+    def resolve_device(self) -> str:
+        """"auto" -> what is actually available. Returns "cuda" or "cpu".
+
+        Timeouts are not adjusted here: a CPU run of the same model is roughly an
+        order of magnitude slower, and silently stretching the limit would hide a
+        genuinely hung process. `spinelab run --device cpu` is expected to be given
+        a longer `--timeout` deliberately.
+        """
+        if self.device in ("cuda", "gpu"):
+            return "cuda"
+        if self.device == "cpu":
+            return "cpu"
+        try:
+            import torch
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:  # noqa: BLE001 — no torch at all means no GPU path
+            return "cpu"
 
     def ensure_dirs(self) -> None:
         for d in (

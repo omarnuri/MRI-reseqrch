@@ -37,7 +37,10 @@ WEIGHT_CACHES = ("spineps", "totalsegmentator", "totalspineseg", "huggingface")
 
 
 def in_colab() -> bool:
-    return "google.colab" in sys.modules or Path("/content").is_dir()
+    # `/content` is checked only on Linux: on Windows the same literal resolves to
+    # C:\content, and a directory that happens to exist there is not Colab.
+    return ("google.colab" in sys.modules
+            or (sys.platform.startswith("linux") and Path("/content").is_dir()))
 
 
 def drive_is_mounted(mountpoint: str = MOUNTPOINT) -> bool:

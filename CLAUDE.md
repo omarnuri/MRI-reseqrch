@@ -26,8 +26,20 @@ python -m spinelab run --dicom /path/study.zip --cache ~/spinelab-cache
 python -m spinelab audit --dicom /path/dicom
 ```
 
-Local venv: `.venv/` (Python 3.14, numpy + nibabel + pytest only — the heavy
-segmentation stack is installed in Colab, never here).
+Two local venvs, on purpose:
+
+* `.venv/` — Python 3.14, numpy + nibabel + pydicom + pytest. Runs the test suite
+  in ~10 s. This is the one to use for everything that does not need a model.
+* `.venv312/` — Python 3.12 (same minor as Colab), the full segmentation stack on
+  CPU torch. Exists so the GPU stages can be debugged here instead of by guessing
+  at a Colab traceback. `uv` manages the interpreter: `uv python install 3.12`.
+
+```bash
+.venv312/Scripts/python -m spinelab run --dicom … --device cpu --timeout 14400
+```
+
+CPU inference is roughly ten times slower than an A100 and produces the same masks,
+so it finds code bugs but is not how a real run should be made.
 
 ## Hard constraints
 
@@ -41,5 +53,15 @@ segmentation stack is installed in Colab, never here).
 ## Environment notes
 
 The operator's internet is slow: prefer changes that avoid re-downloading model
-weights (Drive-backed caches, resumable stages, sparse clones). Local pip installs
-of large wheels (scipy, torch) time out — keep `analysis.py` numpy-only.
+weights (Drive-backed caches, resumable stages, sparse clones). Keep `analysis.py`
+numpy-only regardless — it is the part that must stay testable in one second.
+
+Two upstream facts that cost several sessions, both encoded in `envsetup.py`:
+
+* SPINEPS 2.0.0 declares `acvl-utils==0.2`; nnU-Net has needed `>=0.2.6` since
+  2.7.0. No resolver can satisfy both, so SPINEPS is installed with `--no-deps` and
+  its dependencies are listed by hand. Do not put SPINEPS back into
+  `SEGMENTATION_PACKAGES`.
+* Google Drive is a cache, never a requirement. A failed mount must degrade to a
+  local cache, and nothing may be created under an unmounted `/content/drive` —
+  that stub is what makes the next mount fail too.

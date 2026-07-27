@@ -30,7 +30,11 @@ def run(ctx: Context) -> StageResult:
 
     out_dir = cfg.intermediate_dir / "totalspineseg"
     out_dir.mkdir(parents=True, exist_ok=True)
-    in_dir = Path("/tmp/spinelab_tss_input")
+    # A sibling of the output directory, not inside it: totalspineseg writes its
+    # results into the output tree, and an input copy living there would be found
+    # by the output search. `/tmp/spinelab_tss_input` was hardcoded here, which on
+    # Windows lands in C:\tmp and is shared between every run on the machine.
+    in_dir = cfg.intermediate_dir / "totalspineseg_input"
     if in_dir.exists():
         shutil.rmtree(in_dir, ignore_errors=True)
     in_dir.mkdir(parents=True, exist_ok=True)
@@ -40,8 +44,11 @@ def run(ctx: Context) -> StageResult:
     env.setdefault("TOTALSPINESEG_DATA", str(cfg.weights_dir / "totalspineseg"))
     Path(env["TOTALSPINESEG_DATA"]).mkdir(parents=True, exist_ok=True)
 
-    cmd = ["totalspineseg", str(in_dir), str(out_dir), "--iso"]
-    log.info("data dir: %s", env["TOTALSPINESEG_DATA"])
+    # `--device` defaults to cuda-if-available, which is right on Colab but hides
+    # the choice; passing it makes the run reproducible and lets --device cpu work.
+    device = cfg.resolve_device()
+    cmd = ["totalspineseg", str(in_dir), str(out_dir), "--iso", "--device", device]
+    log.info("data dir: %s, device: %s", env["TOTALSPINESEG_DATA"], device)
     import time as _time
     _t0 = _time.time()
     try:
@@ -74,6 +81,7 @@ def run(ctx: Context) -> StageResult:
             "outputs": [str(p) for p in outputs],
             "step2_outputs": [str(p) for p in step2],
             "output_dir": str(out_dir),
+            "device": device,
         },
         artifacts=[str(p) for p in (step2 or outputs)[:10]],
     )
