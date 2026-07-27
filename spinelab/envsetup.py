@@ -131,32 +131,54 @@ def acvl_symbols() -> list[str]:
     return missing
 
 
-#: Packages that Colab preinstalls at a version too old for this stack, where the
-#: declaring package asks for them without a floor — so pip sees the requirement
-#: satisfied and leaves the old build in place. The failure then surfaces deep inside
-#: inference rather than at install time:
+#: Packages whose version has to be pinned here because the package that needs them
+#: declares no bound. `auglab` requires bare "kornia", and nnU-Net 2.8.1 imports
+#: auglab from one of its trainer modules:
 #:
-#:     nnunetv2/.../nnUNetTrainerDAExt.py -> auglab.transforms.gpu -> kornia
+#:     nnunetv2/.../nnUNetTrainerDAExt.py -> auglab.transforms.gpu.contrast
 #:     ImportError: cannot import name 'Tensor' from 'kornia.core'
 #:
-#: `auglab` requires bare "kornia". That killed TotalSegmentator (and with it the
-#: muscle, fat-suppression and second-opinion stages) after the models had already
-#: loaded. Verified working at kornia 0.8.3.
-STALE_ON_COLAB = ("kornia>=0.8",)
+#: `kornia.core.Tensor` existed up to 0.7.x and was removed in 0.8. Verified on the
+#: A100 runtime: with kornia 0.8.3 that import fails, with 0.7.4 the whole chain
+#: (kornia.core.Tensor -> auglab -> nnUNetTrainerDAExt) imports cleanly.
+#:
+#: An earlier version of this pinned `kornia>=0.8`, which is the wrong direction — it
+#: was reasoning from "Colab preinstalls things that are too old" rather than from
+#: what the symbol history actually shows. It cost a whole A100 run.
+STALE_ON_COLAB = ("kornia>=0.7,<0.8",)
 
-#: The call that actually failed. Importing `nnunetv2` succeeds; resolving a trainer
-#: class is what walks into auglab and kornia, so that is what has to be checked.
-#: A top-level import check would have called this environment healthy.
+#: The package nnU-Net scans when it resolves a trainer by name.
+NNUNET_TRAINER_PACKAGE = "nnunetv2.training.nnUNetTrainer"
+
+
 def nnunet_problem() -> str:
-    """Empty string when nnU-Net can resolve a trainer class, else the reason."""
+    """Empty string when every nnU-Net trainer module imports, else which one failed.
+
+    TotalSegmentator and TotalSpineSeg both load their models by asking nnU-Net to
+    find a trainer class by name, and that search imports the modules under
+    nnUNetTrainer/ one after another. A module that cannot be imported therefore kills
+    them *after* the weights are on the GPU.
+
+    The modules are walked explicitly rather than by calling nnU-Net's own search.
+    Two earlier attempts were both wrong: resolving a name that exists stops at the
+    first module that defines it and never reaches the broken one, and resolving a
+    name that does not exist makes nnU-Net raise RuntimeError even when the
+    environment is perfectly healthy. Importing each module and reporting the first
+    failure has no such ambiguity — "not found" and "cannot import" stop being the
+    same signal.
+    """
+    import pkgutil
+
     try:
-        from nnunetv2.utilities.find_objects import recursive_find_trainer_class_by_name
-    except Exception as exc:  # noqa: BLE001 — reported separately as a missing module
+        package = importlib.import_module(NNUNET_TRAINER_PACKAGE)
+    except Exception:  # noqa: BLE001 — reported separately as a missing module
         return ""
-    try:
-        recursive_find_trainer_class_by_name("nnUNetTrainer")
-    except Exception as exc:  # noqa: BLE001
-        return f"{type(exc).__name__}: {exc}"[:200]
+    for info in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
+        try:
+            importlib.import_module(info.name)
+        except Exception as exc:  # noqa: BLE001
+            name = info.name.rsplit(".", 1)[-1]
+            return f"{name}: {type(exc).__name__}: {exc}"[:200]
     return ""
 
 

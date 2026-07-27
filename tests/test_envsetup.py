@@ -293,6 +293,71 @@ class TestNumpyConsistency:
             "object is stale until the kernel restarts — the reader has to be told")
 
 
+class TestNnunetTrainerModules:
+    """The fault that survived two attempts at detecting it.
+
+    nnU-Net 2.8.1 imports `auglab` from one of its trainer modules, auglab imports
+    `Tensor` from `kornia.core`, and that name was removed in kornia 0.8. Both
+    TotalSegmentator and TotalSpineSeg resolve a trainer by name to load a model, so
+    the broken module killed them after the weights were already on the GPU.
+    """
+
+    def test_a_healthy_environment_reports_nothing(self):
+        # No false positives: nnU-Net raises RuntimeError for a name it cannot find,
+        # so an earlier probe-by-absent-name flagged healthy environments as broken.
+        assert envsetup.nnunet_problem() == ""
+
+    def test_a_module_that_cannot_be_imported_is_named(self, monkeypatch):
+        # Walks the real trainer package, with one real module made to fail the way
+        # nnUNetTrainerDAExt does when kornia is 0.8.
+        pytest.importorskip("nnunetv2")
+        real_import = envsetup.importlib.import_module
+        broken = envsetup.NNUNET_TRAINER_PACKAGE + ".nnUNetTrainer"
+
+        def fake_import(name, *args, **kwargs):
+            if name == broken:
+                raise ImportError("cannot import name 'Tensor' from 'kornia.core'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(envsetup.importlib, "import_module", fake_import)
+        problem = envsetup.nnunet_problem()
+        assert "nnUNetTrainer" in problem
+        assert "kornia.core" in problem
+        assert "ImportError" in problem
+
+    def test_the_kornia_pin_excludes_the_release_that_dropped_the_symbol(self):
+        # kornia.core.Tensor exists up to 0.7.x and is gone in 0.8. Verified on the
+        # A100 runtime: 0.8.3 fails, 0.7.4 imports the whole chain.
+        pin = next(p for p in envsetup.STALE_ON_COLAB if p.startswith("kornia"))
+        assert "<0.8" in pin, "kornia >= 0.8 has no kornia.core.Tensor for auglab"
+
+    def test_a_broken_trainer_module_blocks_readiness(self, monkeypatch):
+        monkeypatch.setattr(envsetup, "nnunet_problem",
+                            lambda: "nnUNetTrainerDAExt: ImportError: kornia.core")
+        monkeypatch.setattr(envsetup, "_probe", lambda module: (True, "stub"))
+        monkeypatch.setattr(envsetup, "acvl_symbols", lambda: [])
+        monkeypatch.setattr(envsetup, "numpy_problem", lambda: "")
+        state = envsetup.check(segmentation=True)
+        assert state["ready"] is False
+        assert "nnUNetTrainerDAExt" in state["nnunet_problem"]
+
+    def test_the_message_says_the_failure_is_mid_inference(self, monkeypatch):
+        monkeypatch.setattr(envsetup, "_run", lambda cmd, log: True)
+        monkeypatch.setattr(envsetup, "nnunet_problem",
+                            lambda: "nnUNetTrainerDAExt: ImportError: kornia.core")
+        monkeypatch.setattr(envsetup, "numpy_problem", lambda: "")
+        monkeypatch.setattr(envsetup, "acvl_symbols", lambda: [])
+        # check() only asks about trainer modules when nnunetv2 itself imports, and
+        # it does not in the test environment.
+        monkeypatch.setattr(envsetup, "_probe", lambda module: (True, "stub"))
+        lines: list[str] = []
+        envsetup.install(segmentation=True, apt=False, log=lines.append)
+        text = "\n".join(lines)
+        assert "cannot resolve a trainer class" in text
+        assert "die mid-inference" in text, (
+            "the reader needs to know this is not an import-time failure")
+
+
 class TestSmokeTest:
     """--no-deps means an importable package can still have a dead entry point."""
 
