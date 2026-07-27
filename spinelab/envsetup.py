@@ -129,13 +129,46 @@ def acvl_symbols() -> list[str]:
     return missing
 
 
-def check(segmentation: bool = True) -> dict:
+#: How to ask each CLI to prove it can start. Cheap, and it catches the failure
+#: mode that --no-deps introduces: an importable package whose entry point dies on
+#: a dependency we forgot to list.
+SMOKE_COMMANDS = {"spineps": ["--help"], "totalspineseg": ["--help"], "dcm2niix": ["-h"]}
+
+
+def smoke_test(binaries: dict[str, str | None]) -> dict[str, str]:
+    """Start each CLI and see whether it gets as far as printing its usage.
+
+    Exit status alone is not the test — dcm2niix answers `-h` with a non-zero
+    status — so a Python traceback in the output is what counts as broken.
+    """
+    out = {}
+    for name, path in binaries.items():
+        if path is None:
+            continue
+        try:
+            proc = subprocess.run([path, *SMOKE_COMMANDS.get(name, ["--help"])],
+                                  capture_output=True, text=True, timeout=180)
+        except Exception as exc:  # noqa: BLE001
+            out[name] = f"did not start: {type(exc).__name__}: {exc}"[:160]
+            continue
+        text = (proc.stdout or "") + (proc.stderr or "")
+        if "Traceback (most recent call last)" in text:
+            last = [line for line in text.strip().splitlines() if line.strip()][-1]
+            out[name] = f"starts but crashes: {last}"[:200]
+        else:
+            out[name] = "ok"
+    return out
+
+
+def check(segmentation: bool = True, *, smoke: bool = False) -> dict:
     """What is present, what is missing. Never installs anything."""
     probed = ("torch", "numpy") + required_modules(segmentation) + RECOMMENDED_MODULES
     modules = {m: _probe(m) for m in dict.fromkeys(probed)}
     binaries = {b: shutil.which(b) for b in BINARIES}
     missing = [m for m in required_modules(segmentation) if not modules[m][0]]
     broken = acvl_symbols() if segmentation and modules["spineps"][0] else []
+    smoke_results = smoke_test(binaries) if smoke else {}
+    crashing = [name for name, verdict in smoke_results.items() if verdict != "ok"]
     return {
         "modules": {m: {"importable": ok, "detail": detail} for m, (ok, detail) in modules.items()},
         "binaries": binaries,
@@ -144,7 +177,9 @@ def check(segmentation: bool = True) -> dict:
                              if path is None and (b == "dcm2niix" or segmentation)],
         "missing_recommended": [m for m in RECOMMENDED_MODULES if not modules[m][0]],
         "missing_acvl_symbols": broken,
-        "ready": not missing and not broken,
+        "smoke": smoke_results,
+        "crashing_binaries": crashing,
+        "ready": not missing and not broken and not crashing,
         "gpu": _gpu_line(),
     }
 
@@ -221,7 +256,7 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
             _pip([SPINEPS_PACKAGE], log, force=force, no_deps=True)
             _pip(SPINEPS_DEPS, log, force=force)
 
-        state = check(segmentation)
+        state = check(segmentation, smoke=segmentation)
 
     log("")
     for module, info in state["modules"].items():
@@ -229,8 +264,24 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
         log(f" {mark} {module:18s} "
             f"{info['detail'] if info['importable'] else 'NOT IMPORTABLE — ' + info['detail']}")
     for binary, path in state["binaries"].items():
-        log(f" {' ' if path else '!'} {binary:18s} {path or 'NOT ON PATH'}")
+        verdict = state["smoke"].get(binary)
+        detail = path or "NOT ON PATH"
+        if verdict and verdict != "ok":
+            detail = f"{path} — {verdict}"
+        log(f" {' ' if path and verdict != 'starts but crashes' else '!'} {binary:18s} {detail}")
     log(f"   GPU: {state['gpu']}")
+
+    if state["crashing_binaries"]:
+        log("")
+        log("=" * 70)
+        log(f"These CLIs are installed but cannot start: "
+            f"{', '.join(state['crashing_binaries'])}")
+        for name in state["crashing_binaries"]:
+            log(f"    {name}: {state['smoke'][name]}")
+        log("  A missing import here usually means SPINEPS_DEPS is out of date —")
+        log("  SPINEPS is installed with --no-deps, so that list is the only thing")
+        log("  supplying its dependencies. Add the named package to it.")
+        log("=" * 70)
 
     if state["missing_acvl_symbols"]:
         log("")
@@ -252,7 +303,7 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
         log("  2) If it still fails, the pip output above names the reason.")
         log("  Do not start the pipeline: every stage would skip and the report be empty.")
         log("=" * 70)
-    elif not state["missing_acvl_symbols"]:
+    elif state["ready"]:
         log("\nready — the pipeline can run")
     return state
 

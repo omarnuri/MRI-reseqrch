@@ -7,6 +7,8 @@ tool was missing, and the pipeline then skipped all sixteen stages.
 
 from __future__ import annotations
 
+import pytest
+
 import spinelab.envsetup as envsetup
 
 
@@ -172,6 +174,62 @@ class TestAcvlConflict:
         state = envsetup.check(segmentation=True)
         assert state["modules"]["spineps"]["importable"] is False
         assert state["missing_acvl_symbols"] == []
+
+
+class TestSmokeTest:
+    """--no-deps means an importable package can still have a dead entry point."""
+
+    def test_a_crashing_cli_makes_the_environment_not_ready(self, monkeypatch):
+        monkeypatch.setattr(envsetup, "_run", lambda cmd, log: True)
+        monkeypatch.setattr(envsetup, "_probe", lambda module: (True, "stub"))
+        monkeypatch.setattr(envsetup, "acvl_symbols", lambda: [])
+        monkeypatch.setattr(envsetup.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(envsetup, "smoke_test", lambda binaries: {
+            "spineps": "starts but crashes: ModuleNotFoundError: No module named 'monai'",
+            "totalspineseg": "ok", "dcm2niix": "ok"})
+        lines: list[str] = []
+        state = envsetup.install(segmentation=True, force=True, apt=False, log=lines.append)
+        text = "\n".join(lines)
+        assert state["ready"] is False
+        assert state["crashing_binaries"] == ["spineps"]
+        assert "monai" in text
+        assert "SPINEPS_DEPS" in text, "the fix has to be named, not guessed at"
+        assert "ready — the pipeline can run" not in text
+
+    def test_a_traceback_is_what_counts_as_broken_not_the_exit_status(self, monkeypatch):
+        # dcm2niix answers -h with a non-zero status and is perfectly healthy.
+        class Proc:
+            stdout = "usage: dcm2niix [options]"
+            stderr = ""
+            returncode = 1
+
+        monkeypatch.setattr(envsetup.subprocess, "run", lambda *a, **k: Proc())
+        assert envsetup.smoke_test({"dcm2niix": "/usr/bin/dcm2niix"}) == {"dcm2niix": "ok"}
+
+    def test_a_traceback_is_reported_with_its_last_line(self, monkeypatch):
+        class Proc:
+            stdout = ""
+            stderr = ('Traceback (most recent call last):\n'
+                      '  File "/x/spineps", line 5, in <module>\n'
+                      "ModuleNotFoundError: No module named 'antspyx'\n")
+            returncode = 1
+
+        monkeypatch.setattr(envsetup.subprocess, "run", lambda *a, **k: Proc())
+        verdict = envsetup.smoke_test({"spineps": "/usr/bin/spineps"})["spineps"]
+        assert "crashes" in verdict
+        assert "antspyx" in verdict
+
+    def test_binaries_that_are_absent_are_not_smoke_tested(self):
+        assert envsetup.smoke_test({"spineps": None}) == {}
+
+    def test_check_does_not_run_binaries_unless_asked(self, monkeypatch):
+        # The default `check()` is used by the CLI on every run; spawning three
+        # subprocesses there would make `--check-only` far from instant.
+        monkeypatch.setattr(envsetup, "smoke_test",
+                            lambda binaries: pytest.fail("must not be called"))
+        state = envsetup.check(segmentation=True)
+        assert state["smoke"] == {}
+        assert state["crashing_binaries"] == []
 
 
 class TestTorchWarning:

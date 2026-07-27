@@ -64,6 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup_p.add_argument("--force", action="store_true", help="reinstall even if importable")
     setup_p.add_argument("--no-segmentation", action="store_true",
                         help="core I/O only (no GPU stack)")
+    setup_p.add_argument("--smoke", action="store_true",
+                        help="with --check-only: also start each CLI to confirm it runs")
     setup_p.add_argument("--no-apt", action="store_true", help="skip apt-get")
 
     deid_p = sub.add_parser("deid", help="write a de-identified copy of a DICOM study")
@@ -168,14 +170,21 @@ def main(argv: list[str] | None = None) -> int:
 
         segmentation = not args.no_segmentation
         if args.check_only:
-            state = check(segmentation)
+            state = check(segmentation, smoke=args.smoke)
             for module, info in state["modules"].items():
                 print(f" {' ' if info['importable'] else '!'} {module:18s} "
                       f"{info['detail']}")
             for binary, path in state["binaries"].items():
-                print(f" {' ' if path else '!'} {binary:18s} {path or 'NOT ON PATH'}")
+                verdict = state["smoke"].get(binary)
+                suffix = f" — {verdict}" if verdict and verdict != "ok" else ""
+                print(f" {' ' if path else '!'} {binary:18s} {path or 'NOT ON PATH'}{suffix}")
             print(f"   GPU: {state['gpu']}")
-            print("ready" if state["ready"] else f"missing: {', '.join(state['missing_modules'])}")
+            if state["ready"]:
+                print("ready")
+            else:
+                problems = (state["missing_modules"] + state["missing_acvl_symbols"]
+                            + [f"{b} cannot start" for b in state["crashing_binaries"]])
+                print(f"missing: {', '.join(problems)}")
         else:
             state = install(segmentation=segmentation, force=args.force, apt=not args.no_apt)
         return 0 if state["ready"] else 1
