@@ -16,7 +16,7 @@ from pathlib import Path
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
 from ..runlog import event, get_logger, log_command
-from ..utils import clean_reason, find_outputs
+from ..utils import child_env, clean_reason, find_outputs, tool_path
 
 log = get_logger(__name__)
 
@@ -25,8 +25,10 @@ def run(ctx: Context) -> StageResult:
     cfg = ctx.config
     t2_sag = ctx.require_sequence("T2_SAG")
 
-    if shutil.which("totalspineseg") is None:
-        raise SkipStage("totalspineseg CLI not on PATH (pip install totalspineseg)")
+    executable = tool_path("totalspineseg")
+    if executable is None:
+        raise SkipStage("totalspineseg CLI not found next to this interpreter or on "
+                        "PATH (pip install totalspineseg)")
 
     out_dir = cfg.intermediate_dir / "totalspineseg"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -40,14 +42,14 @@ def run(ctx: Context) -> StageResult:
     in_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy(t2_sag, in_dir / Path(t2_sag).name)
 
-    env = dict(os.environ)
+    env = child_env()
     env.setdefault("TOTALSPINESEG_DATA", str(cfg.weights_dir / "totalspineseg"))
     Path(env["TOTALSPINESEG_DATA"]).mkdir(parents=True, exist_ok=True)
 
     # `--device` defaults to cuda-if-available, which is right on Colab but hides
     # the choice; passing it makes the run reproducible and lets --device cpu work.
     device = cfg.resolve_device()
-    cmd = ["totalspineseg", str(in_dir), str(out_dir), "--iso", "--device", device]
+    cmd = [executable, str(in_dir), str(out_dir), "--iso", "--device", device]
     log.info("data dir: %s, device: %s", env["TOTALSPINESEG_DATA"], device)
     import time as _time
     _t0 = _time.time()

@@ -185,9 +185,9 @@ def _gpu_info() -> dict | str:
 
 
 def _which(binary: str) -> str | None:
-    import shutil
+    from .utils import tool_path
 
-    return shutil.which(binary)
+    return tool_path(binary)
 
 
 def _git_sha() -> str | None:

@@ -12,7 +12,7 @@ from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
 from ..runlog import event, get_logger, log_command
 from ..sequences import build_picks, describe_series
-from ..utils import clean_reason, read_json, write_json
+from ..utils import child_env, clean_reason, read_json, tool_path, write_json
 
 log = get_logger(__name__)
 
@@ -43,7 +43,7 @@ def _run_dcm2niix(dicom_dir: Path, nifti_dir: Path, *, merge: bool = False) -> t
 
     nifti_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "dcm2niix",
+        tool_path("dcm2niix") or "dcm2niix",
         "-z", "y",          # gzip
         "-b", "y",          # BIDS sidecar — the pipeline needs TE/TR/TI/ScanOptions
         "-ba", "n",         # keep the sidecar unanonymised so the PHI audit is honest
@@ -58,7 +58,7 @@ def _run_dcm2niix(dicom_dir: Path, nifti_dir: Path, *, merge: bool = False) -> t
     cmd.append(str(dicom_dir))
     log.info("converting DICOM -> NIfTI: %s", dicom_dir)
     t0 = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=child_env())
     log_command("ingest", cmd, proc, seconds=time.time() - t0)
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -135,7 +135,7 @@ def run(ctx: Context) -> StageResult:
     event("phi_audit", verdict=phi["verdict"], files_sampled=phi["files_sampled"],
           tags=phi["phi_tags_present"])
 
-    if shutil.which("dcm2niix") is None:
+    if tool_path("dcm2niix") is None:
         raise SkipStage("dcm2niix is not installed (apt-get install -y dcm2niix)")
 
     existing = sorted(cfg.nifti_dir.glob("*.nii*"))

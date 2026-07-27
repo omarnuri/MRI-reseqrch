@@ -29,7 +29,7 @@ from pathlib import Path
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
 from ..runlog import event, get_logger, log_command
-from ..utils import clean_reason, find_outputs
+from ..utils import child_env, clean_reason, find_outputs, tool_path
 
 log = get_logger(__name__)
 
@@ -38,8 +38,10 @@ def run(ctx: Context) -> StageResult:
     cfg = ctx.config
     t2_sag = ctx.require_sequence("T2_SAG")
 
-    if shutil.which("spineps") is None:
-        raise SkipStage("spineps CLI not on PATH (pip install SPINEPS>=2.0.0)")
+    executable = tool_path("spineps")
+    if executable is None:
+        raise SkipStage("spineps CLI not found next to this interpreter or on PATH "
+                        "(pip install SPINEPS>=2.0.0)")
 
     out_dir = cfg.intermediate_dir / "spineps"
     # `spineps sample` writes its derivatives next to the input file, so the input
@@ -54,9 +56,9 @@ def run(ctx: Context) -> StageResult:
     Path(models_dir).mkdir(parents=True, exist_ok=True)
 
     device = cfg.resolve_device()
-    cmd = _spineps_cmd(work_input, device)
-    env = dict(os.environ, SPINEPS_SEGMENTOR_MODELS=models_dir)
-    log.info("device: %s", device)
+    cmd = _spineps_cmd(work_input, device, executable)
+    env = child_env(SPINEPS_SEGMENTOR_MODELS=models_dir)
+    log.info("device: %s, executable: %s", device, executable)
     log.info("models dir: %s (%d entries)", models_dir,
              len(list(Path(models_dir).glob('*'))) if Path(models_dir).exists() else 0)
     log.info("input copy: %s", work_input)
@@ -112,7 +114,7 @@ def run(ctx: Context) -> StageResult:
 
     if cfg.quality and cfg.tta_mirror and semantic_masks:
         data["mirror_consistency"] = _mirror_consistency(
-            t2_sag, semantic_masks[0], out_dir, env, cfg, device)
+            t2_sag, semantic_masks[0], out_dir, env, cfg, device, executable)
 
     return StageResult(
         name="spineps", status=status, evidence=Evidence.MODEL, reason=reason,
@@ -121,11 +123,11 @@ def run(ctx: Context) -> StageResult:
     )
 
 
-def _spineps_cmd(image: Path, device: str) -> list[str]:
+def _spineps_cmd(image: Path, device: str, executable: str = "spineps") -> list[str]:
     """The `spineps sample` invocation. `-cpu` is not optional off a GPU host:
     without it SPINEPS loads its models onto CUDA and dies on `torch.cuda`."""
     cmd = [
-        "spineps", "sample",
+        executable, "sample",
         "-ignore_bids_filter",
         "-ignore_inference_compatibility",
         "-i", str(image),
@@ -140,7 +142,7 @@ def _spineps_cmd(image: Path, device: str) -> list[str]:
 
 
 def _mirror_consistency(t2_sag: str, semantic_mask: str, out_dir: Path, env: dict, cfg,
-                        device: str) -> dict:
+                        device: str, executable: str) -> dict:
     """Is the model's LEFT/RIGHT assignment stable under mirroring?
 
     Run the segmenter again on a left-right mirrored copy of the study, mirror the
@@ -168,8 +170,9 @@ def _mirror_consistency(t2_sag: str, semantic_mask: str, out_dir: Path, env: dic
         mirrored_path = mirror_dir / "MIRRORED_DO_NOT_USE_AS_DATA.nii.gz"
         nib.save(nib.Nifti1Image(flipped, src.affine, src.header), str(mirrored_path))
 
-        proc = subprocess.run(_spineps_cmd(mirrored_path, device), capture_output=True,
-                              text=True, timeout=cfg.timeout_spineps_s, env=env)
+        proc = subprocess.run(_spineps_cmd(mirrored_path, device, executable),
+                              capture_output=True, text=True,
+                              timeout=cfg.timeout_spineps_s, env=env)
 
         produced = [p for p in find_outputs(mirror_dir, "*spine_msk*.nii.gz", exclude_dirs=())
                     if p != mirrored_path]

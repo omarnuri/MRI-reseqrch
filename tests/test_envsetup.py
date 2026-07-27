@@ -183,7 +183,7 @@ class TestSmokeTest:
         monkeypatch.setattr(envsetup, "_run", lambda cmd, log: True)
         monkeypatch.setattr(envsetup, "_probe", lambda module: (True, "stub"))
         monkeypatch.setattr(envsetup, "acvl_symbols", lambda: [])
-        monkeypatch.setattr(envsetup.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(envsetup, "tool_path", lambda name: f"/usr/bin/{name}")
         monkeypatch.setattr(envsetup, "smoke_test", lambda binaries: {
             "spineps": "starts but crashes: ModuleNotFoundError: No module named 'monai'",
             "totalspineseg": "ok", "dcm2niix": "ok"})

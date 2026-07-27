@@ -151,7 +151,24 @@ def _stage_list(only: str | None, skip: str | None) -> tuple[str, ...]:
     return stages
 
 
+def _make_output_unicode_safe() -> None:
+    """Never let a console codepage turn into an exception.
+
+    SPINEPS registers an atexit callback that prints a citation banner with box
+    characters through `rich`. Importing spineps registers it in *our* process too,
+    so on a cp1251 console `python -m spinelab` ended every invocation with a
+    UnicodeEncodeError traceback after having done its work perfectly. Report text
+    is Cyrillic as well, which the same console encodes only by luck.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — a stream that cannot be reconfigured is fine
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _make_output_unicode_safe()
     args = build_parser().parse_args(argv)
 
     if args.command == "stages":

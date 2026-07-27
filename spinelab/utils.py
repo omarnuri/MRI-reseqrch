@@ -7,9 +7,50 @@ imported (and unit-tested) on a machine that has nothing but the stdlib.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any, Iterable
+
+# --------------------------------------------------------------------------
+# External tools
+# --------------------------------------------------------------------------
+
+
+def tool_path(name: str) -> str | None:
+    """Locate a console script, looking beside our own interpreter first.
+
+    `shutil.which` alone is wrong for the way this package is normally run.
+    Console scripts are installed next to the interpreter — `Scripts/` on Windows,
+    `bin/` on POSIX — and that directory only joins PATH when a virtualenv is
+    *activated*. Running `path/to/venv/python -m spinelab` does not activate
+    anything, so `which("spineps")` returned None and every segmentation stage
+    skipped with "not on PATH" while the tool sat right next to the python that
+    was asking.
+    """
+    here = Path(sys.executable).parent
+    for candidate in (here, here / "Scripts", here / "bin"):
+        found = shutil.which(name, path=str(candidate))
+        if found:
+            return found
+    return shutil.which(name)
+
+
+def child_env(**extra: str) -> dict[str, str]:
+    """Environment for a tool subprocess.
+
+    `PYTHONIOENCODING` is forced to UTF-8 because these tools print with `rich`,
+    and on a Windows console (cp1251 here) the box-drawing characters in SPINEPS's
+    citation banner raise UnicodeEncodeError from an atexit callback. The work is
+    already finished by then, but the traceback lands in stderr and becomes the
+    "reason" we report for a run that actually succeeded.
+    """
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.update(extra)
+    return env
 
 # --------------------------------------------------------------------------
 # JSON
@@ -70,10 +111,44 @@ def clean_reason(text: str | None, fallback: str = "no output produced") -> str:
     """
     if not text:
         return fallback
+    text = strip_atexit_noise(text)
     lines = [ln.strip() for ln in text.replace("\r", "\n").split("\n") if ln.strip()]
-    noise = ("%|", "it/s", "B/s", "s/it")
-    lines = [ln for ln in lines if not any(tok in ln for tok in noise)]
+    noise = ("%|", "it/s", "B/s", "s/it") + CITATION_TOKENS
+    lines = [ln for ln in lines
+             if not any(tok in ln for tok in noise) and not _is_rule(ln)]
     return lines[-1][:300] if lines else fallback
+
+
+#: SPINEPS ends every invocation with a citation request. It is the last thing in
+#: the output, so without this the reason a stage failed came out as
+#: "Thank you for using SPINEPS" instead of the error above it.
+CITATION_TOKENS = ("Thank you for using", "Please support our development",
+                   "Thank you!", "GitHub: https", "ArXiv: https")
+
+_RULE_CHARACTERS = set("-=_~*#─━═╌ ")
+
+
+def _is_rule(line: str) -> bool:
+    """A horizontal rule drawn with dashes or box characters, not a message."""
+    stripped = line.strip()
+    return (len(stripped) >= 8
+            and sum(ch in _RULE_CHARACTERS for ch in stripped) / len(stripped) > 0.8)
+
+
+#: SPINEPS prints a citation banner from an atexit callback. On a non-UTF-8 console
+#: that raises, and the traceback is the *last* thing in stderr — so it would be
+#: reported as the reason a run failed, when it happened after the run finished.
+ATEXIT_MARKER = "Exception ignored in atexit callback"
+
+
+def strip_atexit_noise(text: str) -> str:
+    """Drop everything from an ignored-atexit traceback onward.
+
+    By definition those exceptions happen after the process has done its work, so
+    they can never be the cause of a failure — only a distraction from it.
+    """
+    index = text.find(ATEXIT_MARKER)
+    return text[:index] if index != -1 else text
 
 
 def human_duration(seconds: float) -> str:

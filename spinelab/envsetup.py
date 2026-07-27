@@ -22,6 +22,8 @@ import shutil
 import subprocess
 import sys
 
+from .utils import child_env, strip_atexit_noise, tool_path
+
 #: Installed for every run. Only `nibabel` and `pydicom` are hard requirements;
 #: SimpleITK is what the `register` stage needs, and that stage skips cleanly
 #: without it (masks then sit where the DICOM geometry puts them).
@@ -147,11 +149,15 @@ def smoke_test(binaries: dict[str, str | None]) -> dict[str, str]:
             continue
         try:
             proc = subprocess.run([path, *SMOKE_COMMANDS.get(name, ["--help"])],
-                                  capture_output=True, text=True, timeout=180)
+                                  capture_output=True, text=True, timeout=180,
+                                  env=child_env())
         except Exception as exc:  # noqa: BLE001
             out[name] = f"did not start: {type(exc).__name__}: {exc}"[:160]
             continue
-        text = (proc.stdout or "") + (proc.stderr or "")
+        # An atexit traceback is dropped first: SPINEPS prints a citation banner from
+        # one, and on a non-UTF-8 console that raises *after* the tool has finished
+        # its work. Reading that as "the CLI crashes" would condemn a healthy tool.
+        text = strip_atexit_noise((proc.stdout or "") + (proc.stderr or ""))
         if "Traceback (most recent call last)" in text:
             last = [line for line in text.strip().splitlines() if line.strip()][-1]
             out[name] = f"starts but crashes: {last}"[:200]
@@ -164,7 +170,9 @@ def check(segmentation: bool = True, *, smoke: bool = False) -> dict:
     """What is present, what is missing. Never installs anything."""
     probed = ("torch", "numpy") + required_modules(segmentation) + RECOMMENDED_MODULES
     modules = {m: _probe(m) for m in dict.fromkeys(probed)}
-    binaries = {b: shutil.which(b) for b in BINARIES}
+    # tool_path, not shutil.which: console scripts sit next to the interpreter, and
+    # that directory is only on PATH when a virtualenv has been *activated*.
+    binaries = {b: tool_path(b) for b in BINARIES}
     missing = [m for m in required_modules(segmentation) if not modules[m][0]]
     broken = acvl_symbols() if segmentation and modules["spineps"][0] else []
     smoke_results = smoke_test(binaries) if smoke else {}
