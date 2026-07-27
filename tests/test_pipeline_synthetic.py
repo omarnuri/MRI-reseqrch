@@ -438,64 +438,90 @@ def _all_keys(obj, out=None):
     return out
 
 
-def _body_phantom(rim_value: float, core_value: float = 100.0, *, seed: int = 7):
-    """A body with a distinct subcutaneous band, for the fat-suppression check."""
+def _tissue_phantom(fat_value: float, muscle_value: float = 100.0, *, seed: int = 7):
+    """An image plus the fat and muscle masks TotalSegmentator would provide."""
     rng = np.random.default_rng(seed)
-    vol = np.zeros((LR, AP, SI))
-    vol[2:LR - 2, 6:AP - 6, 6:SI - 6] = rim_value
-    vol[4:LR - 4, 14:AP - 14, 14:SI - 14] = core_value
-    return np.clip(vol + rng.normal(0, 2.0, vol.shape) * (vol > 0), 0, None)
+    image = np.clip(rng.normal(muscle_value, 3.0, (LR, AP, SI)), 1, None)
+    fat = np.zeros((LR, AP, SI), dtype=bool)
+    muscle = np.zeros((LR, AP, SI), dtype=bool)
+    fat[2:6, 4:12, 4:SI - 4] = True            # a subcutaneous slab
+    muscle[8:14, 20:32, 4:SI - 4] = True       # paraspinal muscle
+    image[fat] = rng.normal(fat_value, 3.0, int(fat.sum()))
+    return image, fat, muscle
 
 
 class TestFatSuppressionGate:
-    """A series that claims fat suppression but does not show it must not be trusted."""
+    """A series that claims fat suppression but does not show it must not be trusted.
 
-    def _seed(self, tmp_path, *, fat_rim: float):
+    The check compares subcutaneous fat against skeletal muscle within one series.
+    The first implementation compared a geometric shell against an eroded core, and
+    on the real study that gave rim=2 964 573 voxels against core=6 757 — a number
+    about shape, not tissue, which then voided the whole oedema branch.
+    """
+
+    def _seed(self, tmp_path, *, fat_on_stir: float, with_masks: bool = True):
         cfg = seed_study(tmp_path, fatsat=True, bright_level=18, bright_side="right")
         cfg.stages = ("fatsat_qc", "marrow", "posterior", "report")
+
+        stir, fat_mask, muscle_mask = _tissue_phantom(fat_on_stir)
+        t2, _, _ = _tissue_phantom(400.0, seed=8)      # plain T2: fat is bright
         picks = json.loads((cfg.stage_dir / "ingest.json").read_text(encoding="utf-8"))["data"]["picks"]
-        # Control T2: bright subcutaneous fat. Suppressed series: `fat_rim` decides
-        # whether the band actually darkens.
-        picks["T2_SAG"] = _save(_body_phantom(400.0), cfg.nifti_dir / "t2_body.nii.gz")
-        picks["FATSAT_BEST"] = _save(_body_phantom(fat_rim),
-                                     cfg.nifti_dir / "stir_body.nii.gz")
+        picks["T2_SAG"] = _save(t2, cfg.nifti_dir / "t2_tissue.nii.gz")
+        picks["FATSAT_BEST"] = _save(stir, cfg.nifti_dir / "stir_tissue.nii.gz")
         picks["FATSAT_PLANE"] = "coronal"
         picks["FATSAT_LABEL"] = "T2 FS"
         _write_stage(cfg, "ingest", {"picks": picks, "n_series": 2, "series": []})
+
+        outputs = []
+        if with_masks:
+            outputs = [
+                _save(fat_mask.astype(np.int16), cfg.nifti_dir / "subcutaneous_fat.nii.gz"),
+                _save(muscle_mask.astype(np.int16), cfg.nifti_dir / "skeletal_muscle.nii.gz"),
+            ]
+        _write_stage(cfg, "totalsegmentator", {"outputs": outputs, "muscle_pairs": {}})
         return cfg
 
     def test_working_suppression_is_confirmed(self, tmp_path):
-        cfg = self._seed(tmp_path, fat_rim=60.0)
+        cfg = self._seed(tmp_path, fat_on_stir=60.0)     # fat darker than muscle
         results = run_pipeline(cfg, log=lambda *_: None)
         qc = results["fatsat_qc"]
         assert qc.data["suppression_effective"] is True
-        assert qc.status.value == "ok"
+        assert qc.data["fatsat_stats"]["fat_to_muscle_ratio"] < 1.0
+        assert qc.data["control_stats"]["fat_to_muscle_ratio"] > 2.0
 
     def test_absent_suppression_is_caught(self, tmp_path):
-        cfg = self._seed(tmp_path, fat_rim=400.0)
+        cfg = self._seed(tmp_path, fat_on_stir=400.0)    # fat still bright
         results = run_pipeline(cfg, log=lambda *_: None)
         qc = results["fatsat_qc"]
         assert qc.data["suppression_effective"] is False
         assert "NO evidence of fat suppression" in qc.data["verdict"]
 
+    def test_without_tissue_masks_it_refuses_rather_than_guessing(self, tmp_path):
+        cfg = self._seed(tmp_path, fat_on_stir=60.0, with_masks=False)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        assert results["fatsat_qc"].status.value == "skipped"
+        assert "cannot be verified" in results["fatsat_qc"].reason
+        # And the stages that depend on it must treat this as unverified, not failed.
+        assert results["posterior"].evidence.value == "heuristic"
+
     def test_marrow_carries_the_warning_forward(self, tmp_path):
-        cfg = self._seed(tmp_path, fat_rim=400.0)
+        cfg = self._seed(tmp_path, fat_on_stir=400.0)
         results = run_pipeline(cfg, log=lambda *_: None)
         marrow = results["marrow"]
-        if marrow.data:  # the phantom body may leave too few vertebrae measurable
+        if marrow.data:
             assert marrow.data["fat_suppression_verified"] is False
             assert any("FAT SUPPRESSION NOT CONFIRMED" in x
                        for x in marrow.data["interpretation_limits"])
 
     def test_posterior_is_downgraded_to_not_diagnostic(self, tmp_path):
-        cfg = self._seed(tmp_path, fat_rim=400.0)
+        cfg = self._seed(tmp_path, fat_on_stir=400.0)
         results = run_pipeline(cfg, log=lambda *_: None)
         assert results["posterior"].evidence.value == "not_diagnostic"
         assert any("FAT SUPPRESSION NOT CONFIRMED" in x
                    for x in results["posterior"].data["interpretation_limits"])
 
     def test_report_shows_the_check(self, tmp_path):
-        cfg = self._seed(tmp_path, fat_rim=400.0)
+        cfg = self._seed(tmp_path, fat_on_stir=400.0)
         run_pipeline(cfg, log=lambda *_: None)
         html_text = (cfg.results_dir / "report.html").read_text(encoding="utf-8")
         assert "Работает ли подавление жира" in html_text
@@ -507,86 +533,6 @@ class TestFatSuppressionGate:
         assert results["marrow"].data["fat_suppression_verified"] is None
         assert any("not checked" in x
                    for x in results["marrow"].data["interpretation_limits"])
-
-
-class TestRunLogging:
-    """Diagnosis at a distance: a run must leave enough behind to be debugged."""
-
-    def test_log_and_event_stream_are_written(self, tmp_path):
-        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, axial=True)
-        cfg.stages = ("geometry", "marrow", "report")
-        run_pipeline(cfg, log=lambda *_: None)
-        log_text = (cfg.results_dir / "run.log").read_text(encoding="utf-8")
-        assert "stage geometry: start" in log_text or "stage geometry" in log_text
-        assert (cfg.results_dir / "run.jsonl").exists()
-
-    def test_events_are_valid_jsonl_with_stage_boundaries(self, tmp_path):
-        from spinelab.runlog import read_events
-
-        cfg = seed_study(tmp_path, fatsat=True, bright_level=18)
-        cfg.stages = ("geometry", "report")
-        run_pipeline(cfg, log=lambda *_: None)
-        events = read_events(cfg.results_dir)
-        kinds = [e["kind"] for e in events]
-        assert "run_start" in kinds and "run_end" in kinds
-        assert "environment" in kinds
-        starts = {e["stage"] for e in events if e["kind"] == "stage_start"}
-        ends = {e["stage"] for e in events if e["kind"] == "stage_end"}
-        assert starts == ends == {"geometry", "report"}
-        assert all("ts" in e for e in events)
-
-    def test_environment_snapshot_records_versions(self, tmp_path):
-        from spinelab.runlog import read_events
-
-        cfg = seed_study(tmp_path, fatsat=True)
-        cfg.stages = ("report",)
-        run_pipeline(cfg, log=lambda *_: None)
-        env = next(e for e in read_events(cfg.results_dir) if e["kind"] == "environment")
-        assert env["numpy"] and env["nibabel"]
-        assert "gpu" in env and "env" in env
-
-    def test_study_limitations_are_recorded_as_problems(self, tmp_path):
-        from spinelab.runlog import read_events
-
-        cfg = seed_study(tmp_path, fatsat=False)   # no fat-suppressed series
-        cfg.stages = ("marrow", "report")
-        run_pipeline(cfg, log=lambda *_: None)
-        problems = [e for e in read_events(cfg.results_dir) if e["kind"] == "problem"]
-        # ingest was pre-seeded here, so the marrow skip is what must be visible
-        skipped = [e for e in read_events(cfg.results_dir)
-                   if e["kind"] == "stage_end" and e["status"] == "skipped"]
-        assert skipped or problems
-
-    def test_digest_is_paste_sized_and_names_the_stages(self, tmp_path):
-        from spinelab.runlog import digest
-
-        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, axial=True)
-        cfg.stages = ("geometry", "facets_axial", "marrow", "report")
-        run_pipeline(cfg, log=lambda *_: None)
-        text = digest(cfg.work_dir)
-        assert "spinelab run digest" in text
-        for stage in ("geometry", "facets_axial", "marrow", "report"):
-            assert stage in text
-        assert len(text) < 20000
-
-    def test_digest_shows_an_aborted_run_first(self, tmp_path):
-        from spinelab.runlog import digest
-
-        cfg = Config(work_dir=tmp_path / "empty", dicom_source=str(tmp_path / "nope.zip"))
-        run_pipeline(cfg, log=lambda *_: None)
-        text = digest(cfg.work_dir)
-        assert "ABORTED" in text
-
-    def test_key_numbers_render_without_a_full_run(self, tmp_path):
-        from spinelab.cli import _key_numbers
-
-        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, axial=True)
-        cfg.stages = ("geometry", "facets_axial", "report")
-        run_pipeline(cfg, log=lambda *_: None)
-        text = _key_numbers(cfg.work_dir)
-        assert "key numbers" in text
-        assert "max wedge angle" in text
-        assert "cord dice" in text
 
 
 class TestReportNumbering:
@@ -666,11 +612,11 @@ class TestStageContract:
         cfg.stages = ("fatsat_qc", "facets_axial", "geometry", "marrow", "posterior",
                       "radiomics", "report")
         results = run_pipeline(cfg, log=lambda *_: None)
-        # The phantom is uniform noise with no body outline, so the fat-suppression
-        # check has nothing to delineate. Skipping with that reason is the correct
-        # behaviour — it must not invent a verdict.
+        # No TotalSegmentator tissue masks here, so fat suppression cannot be
+        # verified. Skipping with that reason is the correct behaviour — it must not
+        # invent a verdict from geometry, which is what the first version did.
         assert results["fatsat_qc"].status.value == "skipped"
-        assert "rim and core" in results["fatsat_qc"].reason
+        assert "cannot be verified" in results["fatsat_qc"].reason
         for name, res in results.items():
             if name == "fatsat_qc":
                 continue

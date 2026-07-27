@@ -15,7 +15,6 @@ from spinelab.analysis import (
     canal_area_profile,
     curvature_metrics,
     facet_interface,
-    rim_to_core_ratio,
     dice,
     label_agreement,
     longest_run,
@@ -271,30 +270,6 @@ class TestMorphology:
         mask[1, 1, 1] = True
         assert np.array_equal(binary_dilate(mask, 0), mask)
         assert np.array_equal(binary_erode(mask, 0), mask)
-
-
-class TestFatSuppressionRatio:
-    def _phantom(self, rim_value: float, core_value: float = 100.0):
-        """A block 'body' with a distinct band just inside its surface."""
-        vol = np.zeros((30, 30, 30))
-        vol[5:25, 5:25, 5:25] = rim_value
-        vol[9:21, 9:21, 9:21] = core_value
-        return vol
-
-    def test_unsuppressed_fat_gives_a_high_ratio(self):
-        stats = rim_to_core_ratio(self._phantom(rim_value=400.0), core_iterations=4)
-        assert stats is not None
-        assert stats["rim_to_core_ratio"] > 3.0
-
-    def test_suppressed_fat_gives_a_low_ratio(self):
-        stats = rim_to_core_ratio(self._phantom(rim_value=60.0), core_iterations=4)
-        assert stats["rim_to_core_ratio"] < 1.0
-
-    def test_returns_none_when_there_is_no_body(self):
-        assert rim_to_core_ratio(np.zeros((20, 20, 20))) is None
-
-    def test_returns_none_for_a_tiny_volume(self):
-        assert rim_to_core_ratio(np.ones((3, 3, 3))) is None
 
 
 class TestFacetInterface:

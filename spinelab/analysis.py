@@ -388,52 +388,6 @@ def binary_erode(mask: np.ndarray, iterations: int = 1) -> np.ndarray:
     return out
 
 
-def rim_to_core_ratio(image: np.ndarray, *, rim_iterations: int = 3,
-                      core_iterations: int = 12, body_threshold_percentile: float = 99.0,
-                      body_fraction: float = 0.10) -> dict | None:
-    """Signal of the subcutaneous band relative to the body core.
-
-    A fat-suppression check that needs no extra sequence and no segmentation:
-    subcutaneous fat forms a band just inside the skin. On a sequence that
-    suppresses fat that band is dark relative to the deep soft tissue; on a plain
-    T2 it is much brighter. Running this on both series of the same study and
-    comparing the two ratios says whether the fat suppression actually worked —
-    which decides whether any oedema reading is meaningful at all.
-
-    Returns None when the volume is too small or no body could be found.
-    """
-    image = np.asarray(image, dtype=float)
-    if image.ndim != 3 or image.size < 1000:
-        return None
-    positive = image[image > 0]
-    if positive.size < 100:
-        return None
-    reference = float(np.percentile(positive, body_threshold_percentile))
-    body = image > (body_fraction * reference)
-    if body.sum() < 500:
-        return None
-    core = binary_erode(body, core_iterations)
-    if core.sum() < 100:
-        # Thin slab (a coronal STIR can be only a few slices thick): erode less.
-        core = binary_erode(body, max(1, core_iterations // 4))
-        if core.sum() < 100:
-            return None
-    rim = body & ~binary_erode(body, rim_iterations)
-    if rim.sum() < 100:
-        return None
-    rim_p90 = float(np.percentile(image[rim], 90))
-    core_median = float(np.median(image[core]))
-    if core_median <= 0:
-        return None
-    return {
-        "rim_voxels": int(rim.sum()),
-        "core_voxels": int(core.sum()),
-        "rim_p90": round(rim_p90, 3),
-        "core_median": round(core_median, 3),
-        "rim_to_core_ratio": round(rim_p90 / core_median, 3),
-    }
-
-
 #: Semantic labels that swap meaning when the volume is mirrored left<->right.
 MIRROR_LABEL_PAIRS = ((43, 44), (45, 46), (47, 48), (63, 64))
 
