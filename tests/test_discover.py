@@ -111,6 +111,132 @@ class TestNothingIsGuessed:
         assert found.source.endswith("only.zip")
 
 
+def _dicom_zip(path, members=("study/IM1.dcm",)):
+    """A zip whose members look like DICOM to `contains_dicom`."""
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as zf:
+        for name in members:
+            zf.writestr(name, b"\0" * 128 + b"DICM" + b"payload")
+    return path
+
+
+def _junk_zip(path):
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("notes.txt", "nothing to do with a spine")
+    return path
+
+
+class TestContainsDicom:
+    """Deciding by content, not by file name.
+
+    The real Drive root held nine archives — coursework, a screen recording and two
+    copies of the study — and a name-based rule would be wrong in both directions.
+    """
+
+    def test_an_archive_with_the_dicm_magic_is_recognised(self, tmp_path):
+        from spinelab.discover import contains_dicom
+
+        assert contains_dicom(_dicom_zip(tmp_path / "unnamed.zip", ("a/b/00001",))) is True
+
+    def test_a_dcm_extension_counts_even_without_the_preamble(self, tmp_path):
+        import zipfile
+
+        from spinelab.discover import contains_dicom
+
+        path = tmp_path / "noheader.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("scan/slice1.dcm", "no preamble here")
+        assert contains_dicom(path) is True
+
+    def test_an_unrelated_archive_is_rejected(self, tmp_path):
+        from spinelab.discover import contains_dicom
+
+        assert contains_dicom(_junk_zip(tmp_path / "screen-recording.zip")) is False
+
+    def test_a_corrupt_archive_is_not_a_crash(self, tmp_path):
+        from spinelab.discover import contains_dicom
+
+        broken = tmp_path / "truncated.zip"
+        broken.write_bytes(b"PK\x03\x04 not really a zip")
+        assert contains_dicom(broken) is False
+
+
+class TestAmbiguity:
+    def test_dicom_content_resolves_a_cluttered_folder(self, tmp_path, monkeypatch):
+        import spinelab.discover as mod
+
+        _dicom_zip(tmp_path / "study.zip")
+        _junk_zip(tmp_path / "10 easy.zip")
+        _junk_zip(tmp_path / "coursework.zip")
+        monkeypatch.setattr(mod, "LOCAL_PATTERNS",
+                            (str(tmp_path / "*.zip").replace("\\", "/"),))
+        found = discover(None, allow_repo_lookup=False)
+        assert found.source.endswith("study.zip")
+
+    def test_two_dicom_archives_are_still_refused(self, tmp_path, monkeypatch):
+        # Two copies of a study is exactly the case where guessing is wrong.
+        import spinelab.discover as mod
+
+        _dicom_zip(tmp_path / "study.zip")
+        _dicom_zip(tmp_path / "study (1).zip")
+        monkeypatch.setattr(mod, "LOCAL_PATTERNS",
+                            (str(tmp_path / "*.zip").replace("\\", "/"),))
+        found = discover(None, allow_repo_lookup=False)
+        assert found.source is None
+        assert "ambiguous" in found.how
+        assert len(found.candidates) == 2
+
+    def test_ambiguity_does_not_veto_a_later_location(self, tmp_path, monkeypatch):
+        """The bug this fixes: a cluttered Drive root blocked every other place.
+
+        Nine archives matched /content/drive/MyDrive/*.zip, discovery gave up there,
+        and the copy in the checkout — unambiguous — was never even looked at.
+        """
+        import spinelab.discover as mod
+
+        drive, checkout = tmp_path / "drive", tmp_path / "checkout"
+        drive.mkdir(), checkout.mkdir()
+        _dicom_zip(drive / "study.zip")
+        _dicom_zip(drive / "study (1).zip")
+        _dicom_zip(checkout / "in-checkout.zip")
+        monkeypatch.setattr(mod, "LOCAL_PATTERNS",
+                            (str(drive / "*.zip").replace("\\", "/"),))
+        monkeypatch.setattr(mod, "repo_root", lambda: checkout)
+        found = discover(None, allow_repo_lookup=False)
+        assert found.source.endswith("in-checkout.zip")
+
+    def test_the_candidates_are_reported_so_one_can_be_chosen(self, tmp_path, monkeypatch):
+        import spinelab.discover as mod
+
+        _dicom_zip(tmp_path / "a.zip")
+        _dicom_zip(tmp_path / "b.zip")
+        monkeypatch.setattr(mod, "LOCAL_PATTERNS",
+                            (str(tmp_path / "*.zip").replace("\\", "/"),))
+        found = discover(None, allow_repo_lookup=False)
+        assert all(c.endswith(".zip") for c in found.candidates)
+
+    def test_the_skip_message_lists_the_candidates(self, tmp_path, monkeypatch):
+        import spinelab.discover as mod
+        from spinelab.config import Config
+        from spinelab.pipeline import run_pipeline
+
+        archives = tmp_path / "drive"
+        archives.mkdir()
+        _dicom_zip(archives / "one.zip")
+        _dicom_zip(archives / "two.zip")
+        monkeypatch.setattr(mod, "LOCAL_PATTERNS",
+                            (str(archives / "*.zip").replace("\\", "/"),))
+        monkeypatch.setattr(mod, "_repo_archive_url", lambda: (None, "disabled in test"))
+        cfg = Config(work_dir=tmp_path / "work", dicom_source="")
+        results = run_pipeline(cfg, log=lambda *_: None)
+        reason = results["ingest"].reason
+        assert "one.zip" in reason and "two.zip" in reason
+        assert "DICOM_PATH" in reason, "the reader needs to know where to put the answer"
+
+
 class TestCheckoutFallback:
     """The archive is committed to this repository, so the checkout is searched too.
 

@@ -131,6 +131,53 @@ def acvl_symbols() -> list[str]:
     return missing
 
 
+#: Submodules that only import cleanly when numpy's own file set is from one
+#: version. This is not a hypothetical: on Colab
+#:
+#:     ImportError: cannot import name '_center' from 'numpy._core.umath'
+#:
+#: made SPINEPS and TotalSpineSeg unimportable while nnU-Net and TotalSegmentator
+#: were fine. `_center` is used by numpy's own `_core/strings.py` and re-exported by
+#: `_core/umath.py` from 2.1 onward — so a tree whose strings.py is newer than its
+#: umath.py cannot import either. pip cannot cleanly uninstall the numpy that ships
+#: in Colab's dist-packages, so any version movement can leave exactly this mixture.
+NUMPY_CONSISTENCY_MODULES = ("numpy._core.strings", "numpy.strings")
+
+
+def numpy_problem() -> str:
+    """Empty string when numpy's file set is self-consistent, else the reason."""
+    for module in NUMPY_CONSISTENCY_MODULES:
+        try:
+            importlib.import_module(module)
+        except ImportError as exc:
+            return f"{module}: {exc}"[:200]
+        except Exception:  # noqa: BLE001 — anything else is not this fault
+            return ""
+    return ""
+
+
+def repair_numpy(log) -> bool:
+    """Rewrite numpy's files at the version already installed.
+
+    Reinstalling the *same* version on purpose: the fault is a mixed file set, not a
+    wrong version, and moving numpy is what produces mixtures in the first place.
+    Colab pins 2.0.2 deliberately and every package in this stack accepts it.
+    """
+    try:
+        import numpy
+
+        version = numpy.__version__
+    except Exception as exc:  # noqa: BLE001
+        log(f"   ! numpy cannot be imported at all: {exc}")
+        return False
+
+    log(f"   repairing numpy {version} in place (mixed file set, not a wrong version)")
+    ok = _pip([f"numpy=={version}"], log, force=True, no_deps=True)
+    if not ok:
+        log("   ! numpy could not be reinstalled — the output above says why")
+    return ok
+
+
 #: How to ask each CLI to prove it can start. Cheap, and it catches the failure
 #: mode that --no-deps introduces: an importable package whose entry point dies on
 #: a dependency we forgot to list.
@@ -177,7 +224,9 @@ def check(segmentation: bool = True, *, smoke: bool = False) -> dict:
     broken = acvl_symbols() if segmentation and modules["spineps"][0] else []
     smoke_results = smoke_test(binaries) if smoke else {}
     crashing = [name for name, verdict in smoke_results.items() if verdict != "ok"]
+    numpy_broken = numpy_problem()
     return {
+        "numpy_problem": numpy_broken,
         "modules": {m: {"importable": ok, "detail": detail} for m, (ok, detail) in modules.items()},
         "binaries": binaries,
         "missing_modules": missing,
@@ -187,7 +236,7 @@ def check(segmentation: bool = True, *, smoke: bool = False) -> dict:
         "missing_acvl_symbols": broken,
         "smoke": smoke_results,
         "crashing_binaries": crashing,
-        "ready": not missing and not broken and not crashing,
+        "ready": not missing and not broken and not crashing and not numpy_broken,
         "gpu": _gpu_line(),
     }
 
@@ -236,6 +285,13 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
             _run(["apt-get", "-qq", "update"], log)
             _run(["apt-get", "-qq", "install", "-y", *APT_PACKAGES], log)
 
+        # Before anything else: a mixed numpy makes half this stack unimportable, and
+        # every install below would then be built on top of it.
+        numpy_repaired = False
+        if state["numpy_problem"]:
+            log(f"numpy is inconsistent — {state['numpy_problem']}")
+            numpy_repaired = repair_numpy(log)
+
         log("python: core I/O")
         _pip(CORE_PACKAGES, log, force=force)
 
@@ -265,6 +321,10 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
             _pip(SPINEPS_DEPS, log, force=force)
 
         state = check(segmentation, smoke=segmentation)
+        if numpy_repaired:
+            # The files on disk are coherent now, but this process — and in Colab the
+            # notebook kernel — may still hold modules loaded from the old mixture.
+            state["restart_required"] = True
 
     log("")
     for module, info in state["modules"].items():
@@ -289,6 +349,26 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
         log("  A missing import here usually means SPINEPS_DEPS is out of date —")
         log("  SPINEPS is installed with --no-deps, so that list is the only thing")
         log("  supplying its dependencies. Add the named package to it.")
+        log("=" * 70)
+
+    if state["numpy_problem"]:
+        log("")
+        log("=" * 70)
+        log("numpy's own files come from more than one version:")
+        log(f"    {state['numpy_problem']}")
+        log("  This is what makes SPINEPS and TotalSpineSeg unimportable while nnU-Net")
+        log("  looks fine. pip cannot cleanly uninstall the numpy preinstalled in")
+        log("  Colab's dist-packages, so any version movement can leave this mixture.")
+        log("  Fix, in this order:")
+        log("    1) Runtime -> Restart session, then run this cell again.")
+        log("    2) If it survives a restart, set FORCE_REINSTALL and run again.")
+        log("=" * 70)
+
+    if state.get("restart_required"):
+        log("")
+        log("=" * 70)
+        log("numpy was repaired on disk. Runtime -> Restart session before the")
+        log("pipeline: this kernel still holds modules loaded from the broken tree.")
         log("=" * 70)
 
     if state["missing_acvl_symbols"]:

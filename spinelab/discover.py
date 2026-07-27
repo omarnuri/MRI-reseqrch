@@ -22,6 +22,7 @@ import glob
 import os
 import re
 import subprocess
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,6 +52,37 @@ SOURCE_FILE = "study_source.txt"
 def repo_root() -> Path:
     """The checkout this package is running from."""
     return Path(__file__).resolve().parent.parent
+
+
+#: How many archive members to look at before deciding there is no DICOM in it.
+DICOM_PROBE_MEMBERS = 400
+
+
+def contains_dicom(archive: str | Path) -> bool:
+    """Does this .zip hold DICOM? Decided by content, never by file name.
+
+    The point is to tell a study apart from the other archives that accumulate in a
+    Drive folder, without guessing from names — a study whose name says nothing and
+    a screen recording called `study.zip` must both be classified correctly.
+
+    A DICOM file carries the magic string "DICM" at byte 128. Names ending in .dcm
+    count too, because some exports omit the preamble.
+    """
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            members = [m for m in zf.infolist() if not m.is_dir()][:DICOM_PROBE_MEMBERS]
+            for member in members:
+                if member.filename.lower().endswith(".dcm"):
+                    return True
+            for member in members:
+                if member.file_size < 132:
+                    continue
+                with zf.open(member) as fh:
+                    if fh.read(132)[128:132] == b"DICM":
+                        return True
+    except (zipfile.BadZipFile, OSError, RuntimeError) as exc:
+        log.debug("cannot inspect %s: %s", archive, exc)
+    return False
 
 
 def local_patterns() -> tuple[str, ...]:
@@ -103,16 +135,34 @@ def discover(explicit: str | None = None, *, cache_dir: str | Path | None = None
             if value and not is_placeholder(value):
                 return Discovery(value, f"pointer file {pointer}", [])
 
+    ambiguous: tuple[str, list[str]] | None = None
     for pattern in local_patterns():
         # glob.glob, not Path("/").glob: the latter rejects absolute patterns on
         # Windows outright, so the same code could not be exercised locally.
         matches = sorted(m for m in glob.glob(pattern, recursive=True) if Path(m).is_file())
+        if len(matches) > 1:
+            # A broad location like the root of Drive is a dumping ground; on the
+            # real study it matched nine archives, one of which was a screen
+            # recording. Keep only the ones that actually contain DICOM.
+            dicom_only = [m for m in matches if contains_dicom(m)]
+            if dicom_only and len(dicom_only) < len(matches):
+                log.info("%d of %d archives matching %s contain DICOM",
+                         len(dicom_only), len(matches), pattern)
+                matches = dicom_only
         if len(matches) == 1:
             return Discovery(matches[0], f"found in {pattern}", matches)
         if len(matches) > 1:
+            # Remember it, but keep looking: an unambiguous match in a more specific
+            # location is a better answer than giving up here. Refusing outright meant
+            # a cluttered Drive root could veto every other place a study might be.
             log.warning("several archives match %s: %s", pattern, matches)
-            return Discovery(None, f"ambiguous: {len(matches)} archives match {pattern}",
-                             matches)
+            if ambiguous is None:
+                ambiguous = (pattern, matches)
+
+    if ambiguous is not None:
+        pattern, matches = ambiguous
+        return Discovery(None, f"ambiguous: {len(matches)} archives match {pattern}",
+                         matches)
 
     # The repository lookup is the only step that touches the network. It is
     # skippable by environment variable so that test runs and offline sessions

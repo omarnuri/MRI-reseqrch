@@ -176,6 +176,95 @@ class TestAcvlConflict:
         assert state["missing_acvl_symbols"] == []
 
 
+class TestNumpyConsistency:
+    """The Colab failure that made half the stack unimportable.
+
+        ImportError: cannot import name '_center' from 'numpy._core.umath'
+
+    numpy's own _core/strings.py imports `_center`, and _core/umath.py only
+    re-exports it from 2.1 onward. A tree mixing the two cannot import either — and
+    it is not a wrong version, so no version check would have caught it.
+    """
+
+    def test_a_healthy_numpy_reports_no_problem(self):
+        assert envsetup.numpy_problem() == ""
+
+    def test_a_mixed_tree_is_detected_and_quoted(self, monkeypatch):
+        def broken(module):
+            if module in envsetup.NUMPY_CONSISTENCY_MODULES:
+                raise ImportError(
+                    "cannot import name '_center' from 'numpy._core.umath'")
+            return object()
+
+        monkeypatch.setattr(envsetup.importlib, "import_module", broken)
+        problem = envsetup.numpy_problem()
+        assert "_center" in problem
+        assert "numpy" in problem
+
+    def test_an_unrelated_failure_is_not_blamed_on_numpy(self, monkeypatch):
+        # A MemoryError while importing is not a mixed file set, and saying it is
+        # would send the reader off to reinstall numpy for nothing.
+        def other(module):
+            raise MemoryError("not enough memory")
+
+        monkeypatch.setattr(envsetup.importlib, "import_module", other)
+        assert envsetup.numpy_problem() == ""
+
+    def test_a_mixed_numpy_makes_the_environment_not_ready(self, monkeypatch):
+        monkeypatch.setattr(envsetup, "numpy_problem", lambda: "numpy.strings: boom")
+        state = envsetup.check(segmentation=False)
+        assert state["ready"] is False
+        assert state["numpy_problem"] == "numpy.strings: boom"
+
+    def test_the_repair_keeps_the_installed_version(self, monkeypatch):
+        # Moving numpy is what creates mixtures; the fault is the file set, so the
+        # same version is reinstalled to rewrite it.
+        seen: list[list[str]] = []
+        monkeypatch.setattr(envsetup, "_run", lambda cmd, log: seen.append(cmd) or True)
+        assert envsetup.repair_numpy(lambda *_: None) is True
+        import numpy
+
+        joined = " ".join(seen[0])
+        assert f"numpy=={numpy.__version__}" in joined
+        assert "--force-reinstall" in joined
+        assert "--no-deps" in joined, "repairing numpy must not drag its dependents along"
+
+    def test_the_repair_runs_before_the_stack_is_installed(self, monkeypatch):
+        order: list[str] = []
+        monkeypatch.setattr(envsetup, "_run",
+                            lambda cmd, log: order.append(" ".join(cmd)) or True)
+        monkeypatch.setattr(envsetup, "numpy_problem", lambda: "numpy.strings: boom")
+        monkeypatch.setattr(envsetup, "acvl_symbols", lambda: [])
+        envsetup.install(segmentation=True, apt=False, log=lambda *_: None)
+        numpy_at = next(i for i, c in enumerate(order) if "numpy==" in c)
+        stack_at = next(i for i, c in enumerate(order) if "nnunetv2" in c)
+        assert numpy_at < stack_at, "the stack must not be installed onto a broken numpy"
+
+    def test_a_repair_demands_a_restart_before_the_pipeline(self, monkeypatch):
+        monkeypatch.setattr(envsetup, "_run", lambda cmd, log: True)
+        monkeypatch.setattr(envsetup, "numpy_problem", lambda: "numpy.strings: boom")
+        monkeypatch.setattr(envsetup, "_probe", lambda module: (True, "stub"))
+        monkeypatch.setattr(envsetup, "acvl_symbols", lambda: [])
+        monkeypatch.setattr(envsetup, "smoke_test", lambda binaries: {})
+        lines: list[str] = []
+        envsetup.install(segmentation=True, apt=False, log=lines.append)
+        text = "\n".join(lines)
+        assert "Restart session" in text
+        assert "still holds modules loaded from the broken tree" in text
+
+    def test_the_message_names_numpy_rather_than_just_the_symptom(self, monkeypatch):
+        monkeypatch.setattr(envsetup, "_run", lambda cmd, log: True)
+        monkeypatch.setattr(envsetup, "numpy_problem",
+                            lambda: "numpy._core.strings: cannot import name '_center'")
+        monkeypatch.setattr(envsetup, "acvl_symbols", lambda: [])
+        lines: list[str] = []
+        envsetup.install(segmentation=True, apt=False, log=lines.append)
+        text = "\n".join(lines)
+        assert "more than one version" in text
+        assert "_center" in text
+        assert "SPINEPS and TotalSpineSeg" in text
+
+
 class TestSmokeTest:
     """--no-deps means an importable package can still have a dead entry point."""
 

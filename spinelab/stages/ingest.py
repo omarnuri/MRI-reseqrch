@@ -98,10 +98,18 @@ def run(ctx: Context) -> StageResult:
         found = discover(raw_source, cache_dir=cfg.cache_dir)
         event("study_discovery", **found.to_dict())
         if not found.source:
+            # When the problem is too many candidates, listing them is the whole fix:
+            # the operator can copy one straight into DICOM_PATH.
+            candidates = ""
+            if found.candidates:
+                shown = "; ".join(found.candidates[:10])
+                candidates = (f" Candidates found: {shown}. Pick one and set it as "
+                              f"dicom_source (DICOM_PATH in the notebook).")
             raise SkipStage(
-                f"no study found. dicom_source={raw_source!r} ({found.how}). Put the "
-                "archive in Drive (…/MyDrive/mri/study.zip), or write its path or URL "
-                "into study_source.txt in the cache directory, or set SPINELAB_STUDY.")
+                f"no study found. dicom_source={raw_source!r} ({found.how})."
+                f"{candidates} Otherwise: put the archive in Drive "
+                "(…/MyDrive/mri/study.zip), or write its path or URL into "
+                "study_source.txt in the cache directory, or set SPINELAB_STUDY.")
         log.info("study discovered: %s — %s", found.source, found.how)
         raw_source = found.source
         cfg.dicom_source = found.source
