@@ -83,7 +83,24 @@ def _fetch_url(url: str, dest_dir: Path) -> Path:
 
 def run(ctx: Context) -> StageResult:
     cfg = ctx.config
+    # Nobody should have to type a path. If the configured source is missing or is
+    # still the placeholder, find the study instead of failing.
+    from ..discover import discover, is_placeholder
+
     raw_source = cfg.dicom_source or ""
+    if is_placeholder(raw_source) or not (
+            raw_source.startswith(("http://", "https://")) or Path(raw_source).exists()):
+        found = discover(raw_source, cache_dir=cfg.cache_dir)
+        event("study_discovery", **found.to_dict())
+        if not found.source:
+            raise SkipStage(
+                f"no study found. dicom_source={raw_source!r} ({found.how}). Put the "
+                "archive in Drive (…/MyDrive/mri/study.zip), or write its path or URL "
+                "into study_source.txt in the cache directory, or set SPINELAB_STUDY.")
+        log.info("study discovered: %s — %s", found.source, found.how)
+        raw_source = found.source
+        cfg.dicom_source = found.source
+
     log.info("dicom_source=%r", raw_source)
     if raw_source.startswith(("http://", "https://")):
         log.info("source is a URL — downloading into the workspace")

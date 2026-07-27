@@ -26,7 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run_p = sub.add_parser("run", help="run the pipeline")
-    run_p.add_argument("--dicom", required=True, help="DICOM directory or .zip")
+    run_p.add_argument("--dicom", default="",
+                       help="DICOM directory, .zip or URL. Omit to let the pipeline "
+                            "find the study (Drive, /content, or the repository)")
     run_p.add_argument("--work", default="/content/spine_work", help="workspace directory")
     run_p.add_argument("--cache", default=None,
                        help="persistent weights cache (put this on Google Drive)")
@@ -47,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     audit_p = sub.add_parser("audit", help="report identifying tags in a DICOM study")
     audit_p.add_argument("--dicom", required=True)
     audit_p.add_argument("--sample", type=int, default=40)
+
+    sub.add_parser("find", help="show which study would be used, and how it was found")
 
     deid_p = sub.add_parser("deid", help="write a de-identified copy of a DICOM study")
     deid_p.add_argument("--dicom", required=True)
@@ -144,6 +148,16 @@ def main(argv: list[str] | None = None) -> int:
 
         print(json.dumps(audit(args.dicom, sample=args.sample), indent=2, ensure_ascii=False))
         return 0
+
+    if args.command == "find":
+        from .discover import discover
+
+        found = discover(None)
+        print(f"source : {found.source or '(not found)'}")
+        print(f"how    : {found.how}")
+        for candidate in found.candidates:
+            print(f"  candidate: {candidate}")
+        return 0 if found.source else 1
 
     if args.command == "diagnose":
         from .runlog import digest
