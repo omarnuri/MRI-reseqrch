@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .. import labels as L
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
 from ..runlog import event, get_logger, log_command
@@ -77,29 +78,71 @@ def run(ctx: Context) -> StageResult:
                   "stderr_tail": (proc.stderr or "")[-1500:]},
         )
 
-    step2 = [p for p in outputs if "step2" in str(p).lower()]
+    label_volume, label_note = _pick_label_volume(outputs)
     # Files on disk are not the same thing as a finished run. This reported OK on a
     # run that exited rc=1 partway through, and the missing labels then showed up two
     # stages later as "no canal segmentation" and "no volume containing a cord label"
     # — symptoms of a failure that had already been recorded and ignored here.
-    partial = proc.returncode != 0 or not step2
+    partial = proc.returncode != 0 or label_volume is None
     reason = None
     if proc.returncode != 0:
         reason = (f"totalspineseg exited rc={proc.returncode} after writing "
                   f"{len(outputs)} volume(s) — the output is incomplete: "
                   f"{clean_reason(proc.stdout)}")
-    elif not step2:
-        reason = ("no step2 output — only the coarse first-pass labels are available, "
-                  "so cord, canal and disc labels may be missing")
+    elif label_volume is None:
+        reason = f"no usable label volume in the output — {label_note}"
+    log.info("label volume: %s (%s)", label_volume, label_note)
     return StageResult(
         name="totalspineseg",
         status=Status.PARTIAL if partial else Status.OK,
         evidence=Evidence.MODEL, reason=reason,
         data={
             "outputs": [str(p) for p in outputs],
-            "step2_outputs": [str(p) for p in step2],
+            # The one file every consumer should read. Naming it here is the point:
+            # three stages each guessed at this from the file names and each guessed
+            # differently, and two of them landed on a soft probability map.
+            "label_volume": str(label_volume) if label_volume else None,
+            "label_volume_note": label_note,
             "output_dir": str(out_dir),
             "device": device,
         },
-        artifacts=[str(p) for p in (step2 or outputs)[:10]],
+        artifacts=[str(label_volume)] if label_volume else [str(p) for p in outputs[:10]],
     )
+
+
+#: Where the discrete label volumes live, best first. `step2_output` is the final
+#: result; `step1_output` is the coarse first pass and only a fallback.
+#:
+#: Everything else in the tree looks like a label volume and is not one:
+#: `step2_input` is a binary mask (2 distinct values), and `step1_canal` and
+#: `step1_cord` are soft maps — on the real study they held 8999 and 6104 distinct
+#: values. Consumers that matched on "step2" or "cord" in the path picked those, which
+#: is why the disc stage found no disc labels and the cord agreement came out at Dice
+#: 0.12 against a probability map.
+LABEL_DIRS = ("step2_output", "step1_output")
+#: A discrete label volume for this task has tens of values, not thousands and not two.
+MIN_LABELS = 5
+MAX_LABELS = 200
+
+
+def _pick_label_volume(outputs) -> tuple[Path | None, str]:
+    """The discrete label volume, chosen by directory and verified by its contents."""
+    import numpy as np
+
+    for directory in LABEL_DIRS:
+        for path in [p for p in outputs if p.parent.name.lower() == directory]:
+            try:
+                import nibabel as nib
+
+                values = np.unique(np.asarray(nib.load(str(path)).dataobj))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("cannot read %s: %s", path, exc)
+                continue
+            n = int(values.size)
+            if MIN_LABELS <= n <= MAX_LABELS and float(values.max()) >= L.TSS_DISC_LABEL_MIN:
+                return path, f"{directory}, {n} distinct labels"
+            log.info("%s has %d distinct values, max %s — not a label volume",
+                     path.name, n, values.max() if n else None)
+    return None, (f"none of {', '.join(LABEL_DIRS)} contained a discrete label volume "
+                  f"({MIN_LABELS}-{MAX_LABELS} values reaching "
+                  f"{L.TSS_DISC_LABEL_MIN})")

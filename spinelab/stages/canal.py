@@ -11,29 +11,30 @@ from __future__ import annotations
 
 import numpy as np
 
+from .. import labels as L
 from ..analysis import canal_area_profile
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
-from ..utils import LR_AXIS, AP_AXIS, load_canonical, write_json
-from ..utils import find_outputs
+from ..utils import AP_AXIS, LR_AXIS, load_canonical, write_json
 
 
 def run(ctx: Context) -> StageResult:
     cfg = ctx.config
     tss = ctx.stage_data("totalspineseg")
-    root = tss.get("output_dir")
-    if not root:
-        raise SkipStage("TotalSpineSeg did not run — no canal mask")
+    # Read the canal out of the verified label volume, by label id. Matching "canal"
+    # in the path picked `step1_canal`, which is a soft map — 8999 distinct values on
+    # the real study — so this measured a thresholded probability, not a segmentation.
+    label_volume = tss.get("label_volume")
+    if not label_volume:
+        raise SkipStage("TotalSpineSeg produced no verified label volume — "
+                        f"{tss.get('label_volume_note') or 'stage did not run'}")
 
-    candidates = [p for p in find_outputs(root, "*.nii.gz") if "canal" in str(p).lower()]
-    if not candidates:
-        raise SkipStage("no canal segmentation in the TotalSpineSeg output")
-
-    img = load_canonical(candidates[0])
-    data = np.asarray(img.get_fdata())
-    mask = data > 0.5
+    img = load_canonical(label_volume)
+    data = np.asarray(img.get_fdata()).astype(np.int32)
+    mask = np.isin(data, L.TSS_CANAL_LABELS)
     if not mask.any():
-        raise SkipStage("canal mask is empty")
+        raise SkipStage(
+            f"the label volume has no canal label ({', '.join(str(v) for v in L.TSS_CANAL_LABELS)})")
 
     zooms = img.header.get_zooms()
     voxel_area = float(zooms[LR_AXIS]) * float(zooms[AP_AXIS])
@@ -42,7 +43,8 @@ def run(ctx: Context) -> StageResult:
     narrowing = profile.get("max_narrowing_pct")
     flagged = bool(narrowing is not None and narrowing >= cfg.canal_stenosis_pct)
     payload = {
-        "mask_file": str(candidates[0]),
+        "mask_file": str(label_volume),
+        "canal_labels": list(L.TSS_CANAL_LABELS),
         "voxel_area_mm2": round(voxel_area, 4),
         **profile,
         "narrowing_threshold_pct": cfg.canal_stenosis_pct,

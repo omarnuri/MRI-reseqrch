@@ -53,9 +53,14 @@ def run(ctx: Context) -> StageResult:
 
     env = child_env()
     device = "cpu" if cfg.resolve_device() == "cpu" else "gpu"
+    # With ml=True the `output` argument is a *file* path, not a directory. Passing the
+    # directory made TotalSegmentator write `crosscheck_vertebrae_mr.nii` as a sibling
+    # of it, so this stage searched inside the directory, found nothing, and reported
+    # "produced no output" for a model that had just saved 4.4 MB of labels.
+    mask_path = out_dir / "vertebrae_mr.nii.gz"
     script = (
         "from totalsegmentator.python_api import totalsegmentator\n"
-        f"totalsegmentator(input={str(t2_sag)!r}, output={str(out_dir)!r}, "
+        f"totalsegmentator(input={str(t2_sag)!r}, output={str(mask_path)!r}, "
         f"task={TASK!r}, ml=True, verbose=False, device={device!r})\n"
     )
     try:
@@ -65,7 +70,8 @@ def run(ctx: Context) -> StageResult:
         return StageResult(name="crosscheck", status=Status.FAILED, evidence=Evidence.MODEL,
                            reason=f"timeout after {cfg.timeout_ts_s}s")
 
-    produced = sorted(out_dir.rglob("*.nii.gz"))
+    # `.nii` as well as `.nii.gz`: TotalSegmentator does not always compress.
+    produced = sorted(out_dir.rglob("*.nii.gz")) + sorted(out_dir.rglob("*.nii"))
     if not produced:
         return StageResult(
             name="crosscheck", status=Status.SKIPPED, evidence=Evidence.MODEL,

@@ -16,26 +16,24 @@ import numpy as np
 from .. import labels as L
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
-from ..utils import find_outputs, load_canonical, resample_mask_to, write_json
+from ..utils import load_canonical, resample_mask_to, write_json
 
 
 def run(ctx: Context) -> StageResult:
     cfg = ctx.config
     t2_sag = ctx.require_sequence("T2_SAG")
     tss = ctx.stage_data("totalspineseg")
-    root = tss.get("output_dir")
-    if not root:
-        raise SkipStage("TotalSpineSeg did not run — no disc labels")
-
-    candidates = [p for p in find_outputs(root, "*.nii.gz") if "step2" in str(p).lower()]
-    if not candidates:
-        candidates = find_outputs(root, "*.nii.gz")
-    if not candidates:
-        raise SkipStage("no label volume in the TotalSpineSeg output")
+    # The volume the segmentation stage verified and named. Matching on "step2" in the
+    # path used to land on step2_input — a binary mask — and this stage then reported
+    # no disc labels on a run where they were present in step2_output.
+    label_volume = tss.get("label_volume")
+    if not label_volume:
+        raise SkipStage("TotalSpineSeg produced no verified label volume — "
+                        f"{tss.get('label_volume_note') or 'stage did not run'}")
 
     t2_img = load_canonical(t2_sag)
     t2 = np.asarray(t2_img.get_fdata(), dtype=float)
-    label_img = resample_mask_to(load_canonical(candidates[0]), t2_img)
+    label_img = resample_mask_to(load_canonical(label_volume), t2_img)
     label_data = np.asarray(label_img.get_fdata()).astype(np.int32)
 
     rows = []
@@ -69,7 +67,7 @@ def run(ctx: Context) -> StageResult:
 
     payload = {
         "reference_image": t2_sag,
-        "label_volume": str(candidates[0]),
+        "label_volume": str(label_volume),
         "cohort_median_signal": round(cohort, 3),
         "discs": rows,
         "method": "within-study T2 signal ranking of TotalSpineSeg disc labels",

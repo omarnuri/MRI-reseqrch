@@ -31,8 +31,23 @@ from ..utils import load_canonical, resample_mask_to, write_json
 log = get_logger(__name__)
 
 #: TotalSegmentator MR label names used as tissue references.
+#:
+#: `subcutaneous_fat` and `skeletal_muscle` are CT-task labels. The MR task
+#: (datasets 850/851) does not have them: on the real study it produced 50 masks and
+#: not one of them was fat. Requiring them meant this stage could never run, and every
+#: oedema reading stayed unverified for a reason that had nothing to do with the data.
+#:
+#: The fatty reference is therefore vertebral marrow, from the SPINEPS corpus label —
+#: adult thoracic marrow is largely fat, so its signal drops markedly under working
+#: fat suppression while muscle barely moves. The muscle reference is autochthon,
+#: which the MR task does provide.
 FAT_LABELS = ("subcutaneous_fat", "torso_fat")
 MUSCLE_LABELS = ("skeletal_muscle", "autochthon_left", "autochthon_right")
+#: Fallback when TotalSegmentator has no fat label at all: marrow against muscle.
+MARROW_IS_THE_FAT_REFERENCE = (
+    "vertebral marrow (SPINEPS corpus label) against autochthon muscle — the "
+    "TotalSegmentator MR task has no fat label, and adult thoracic marrow is largely "
+    "fat, so suppression shows up as a drop in the marrow-to-muscle ratio")
 
 #: Fat/muscle signal ratio below which fat looks suppressed.
 SUPPRESSED_MAX_RATIO = 1.15
@@ -51,12 +66,18 @@ def run(ctx: Context) -> StageResult:
     outputs = [str(p) for p in (ts.get("outputs") or [])]
     fat_masks = _find(outputs, FAT_LABELS)
     muscle_masks = _find(outputs, MUSCLE_LABELS)
+    method = ("median signal of subcutaneous fat against skeletal muscle, "
+              "TotalSegmentator masks, within one series")
+    if not fat_masks:
+        fat_masks = _marrow_masks(ctx)
+        method = MARROW_IS_THE_FAT_REFERENCE
     if not fat_masks or not muscle_masks:
+        missing = "a fatty reference" if not fat_masks else "a muscle reference"
         raise SkipStage(
-            "fat suppression cannot be verified: TotalSegmentator tissue masks "
-            f"(fat: {FAT_LABELS[0]}, muscle: {MUSCLE_LABELS[0]}) are not available. "
-            "Downstream stages will report the suppression as unverified rather than "
-            "assumed — a geometric proxy was tried and measured shape, not tissue.")
+            f"fat suppression cannot be verified: no {missing} is available "
+            f"(TotalSegmentator gave {len(outputs)} masks, none of them fat, and the "
+            "SPINEPS corpus label is needed for the marrow fallback). Downstream "
+            "stages will report the suppression as unverified rather than assumed.")
 
     control = picks.get("T2_SAG") or picks.get("T2_AX")
     measured = _fat_muscle_ratio(fatsat, fat_masks, muscle_masks)
@@ -77,8 +98,7 @@ def run(ctx: Context) -> StageResult:
         "fatsat_image": fatsat,
         "fatsat_label": picks.get("FATSAT_LABEL"),
         "fatsat_plane": picks.get("FATSAT_PLANE"),
-        "method": "median signal of subcutaneous fat against skeletal muscle, "
-                  "TotalSegmentator masks, within one series",
+        "method": method,
         "fatsat_stats": measured,
         "control_image": control,
         "control_stats": control_measured,
@@ -105,6 +125,34 @@ def run(ctx: Context) -> StageResult:
         reason=None if effective else verdict,
         data=payload,
     )
+
+
+def _marrow_masks(ctx: Context) -> list[str]:
+    """Write the vertebral marrow out as a mask file, to stand in for fat.
+
+    Returned as a path rather than an array so the rest of this stage is unchanged,
+    and so the region that was actually measured can be opened and looked at.
+    """
+    import nibabel as nib
+
+    from .. import labels as L
+
+    semantic = (ctx.stage_data("spineps").get("semantic_masks") or [])
+    if not semantic:
+        return []
+    img = load_canonical(semantic[0])
+    data = np.asarray(img.get_fdata()).astype(np.int32)
+    corpus = L.resolve_corpus_label(data)
+    if corpus is None:
+        return []
+    mask = (data == corpus).astype(np.uint8)
+    if int(mask.sum()) < 200:
+        return []
+    out = ctx.config.intermediate_dir / "fatsat_qc" / "marrow_reference.nii.gz"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    nib.save(nib.Nifti1Image(mask, img.affine, img.header), str(out))
+    log.info("marrow reference: label %s, %d voxels -> %s", corpus, int(mask.sum()), out)
+    return [str(out)]
 
 
 def _find(paths: list[str], names: tuple[str, ...]) -> list[str]:

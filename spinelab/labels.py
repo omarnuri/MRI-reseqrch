@@ -122,6 +122,11 @@ def is_vertebra(label: int) -> bool:
 # --------------------------------------------------------------------------
 TSS_SPINAL_CORD = 1
 TSS_CSF = 2
+#: What "the canal" means in this label space: the cord plus the CSF around it.
+#: TotalSpineSeg has no single canal label in tss_map.json — the `step1_canal` file
+#: looks like one and is a soft probability map (8999 distinct values on the real
+#: study), which is what an earlier version of the canal stage thresholded.
+TSS_CANAL_LABELS = (TSS_SPINAL_CORD, TSS_CSF)
 TSS_SACRUM = 50
 #: In tss_map.json vertebrae occupy 11..47 and the sacrum is 50; every label
 #: >= 63 is an intervertebral disc (C2-C3=63 … L5-S=100).
