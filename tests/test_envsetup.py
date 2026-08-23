@@ -435,6 +435,47 @@ class TestTorchWarning:
         assert "replace" not in "\n".join(lines)
 
 
+class TestSct:
+    """SCT is a shell install, not a pip package, so its paths are decided here."""
+
+    def test_models_live_in_the_cache_and_the_toolbox_does_not(self, tmp_path):
+        paths = envsetup.sct_paths(tmp_path / "work", tmp_path / "drive")
+        assert paths["root"] == tmp_path / "work" / "sct"
+        assert paths["models"] == tmp_path / "drive" / "weights" / "sct_models"
+        # A conda env on a FUSE mount is slow; the multi-GB models are what has to
+        # survive a VM reset. Each goes where it belongs.
+        assert paths["models_link"] == paths["root"] / "data" / "deepseg_models"
+
+    def test_without_a_cache_the_models_stay_beside_the_toolbox(self, tmp_path):
+        paths = envsetup.sct_paths(tmp_path / "work")
+        assert paths["models"] == paths["models_link"]
+
+    def test_binary_lookup_prefers_our_install_prefix(self, tmp_path, monkeypatch):
+        binary = tmp_path / "work" / "sct" / "bin" / "sct_deepseg"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setattr(envsetup.shutil, "which", lambda name: "/usr/bin/" + name)
+        assert envsetup.sct_binary("sct_deepseg", tmp_path / "work") == str(binary)
+        assert envsetup.sct_binary("sct_other", tmp_path / "work") == "/usr/bin/sct_other"
+
+    def test_install_reports_a_reason_instead_of_raising(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(envsetup.shutil, "which", lambda name: None)
+        state = envsetup.install_sct(tmp_path / "work", log=lambda *_: None)
+        assert state["installed"] is False
+        assert "git" in state["reason"]
+
+    def test_an_existing_install_is_not_reinstalled(self, tmp_path):
+        binary = tmp_path / "work" / "sct" / "bin" / "sct_deepseg"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        lines: list[str] = []
+        state = envsetup.install_sct(tmp_path / "work", log=lines.append)
+        assert state["installed"] is True
+        assert any("already installed" in line for line in lines)
+        assert state["missing_binaries"] == [
+            "sct_detect_compression", "sct_compute_compression", "sct_compute_ascor"]
+
+
 class TestCliContract:
     def test_check_only_exits_nonzero_when_not_ready(self, capsys):
         from spinelab.cli import main

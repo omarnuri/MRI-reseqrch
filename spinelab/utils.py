@@ -130,6 +130,21 @@ def to_jsonable(obj: Any) -> Any:
     return str(obj)
 
 
+def parse_cli_flags(help_text: str | None) -> set[str]:
+    """Option names a CLI advertises in its own `-h` output.
+
+    Used to build a command from what the installed tool actually accepts instead
+    of from what its documentation says. Spinal Cord Toolbox renamed arguments
+    between 6.x and 7.x and its published page for one command 404s, so guessing
+    would mean a stage that fails on the operator's machine and nowhere else.
+    """
+    import re
+
+    if not help_text:
+        return set()
+    return {match.group(0) for match in re.finditer(r"(?<![\w-])--?[A-Za-z][\w-]*", help_text)}
+
+
 def write_json(path: str | Path, payload: Any) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

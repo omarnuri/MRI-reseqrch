@@ -72,6 +72,7 @@ def run(ctx: Context) -> StageResult:
     sections.append(_marrow_section(ctx))
     sections.append(_muscle_section(ctx))
     sections.append(_canal_section(ctx))
+    sections.append(_compression_section(ctx))
     sections.append(_disc_section(ctx))
     sections.append(_agreement_section(ctx))
     sections.append(_reliability_section(ctx))
@@ -311,6 +312,50 @@ def _canal_section(ctx: Context) -> str:
             f"<li>Измерено срезов: {data.get('n_slices_measured')}</li></ul>"
             f"<div class='box'>{verdict}</div>"
             f"<div class='warn'><b>Границы применимости:</b><ul>{limits}</ul></div>")
+
+
+def _compression_section(ctx: Context) -> str:
+    """The only section whose thresholds come from outside this study.
+
+    It therefore has to carry the cohort with the number: a cut-off is meaningful
+    only together with the population it was fitted on, and the coverage limit
+    (C3/C4–C6/C7, cervical only) is part of the result, not a footnote.
+    """
+    data, note = _stage(ctx, "compression")
+    head = f"{_h2('Шейный канал: пороги из внешних когорт')} {badge_html(Evidence.CALIBRATED)}"
+    if note:
+        return head + note
+
+    detect = data.get("compression") or {}
+    rows = "".join(
+        f"<tr><td>{html.escape(str(level.get('level') or '—'))}</td>"
+        f"<td>{level.get('probability')}</td>"
+        f"<td><b>{html.escape(str(level.get('category') or '—'))}</b></td></tr>"
+        for level in detect.get("levels", [])
+    )
+    table = (f"<table><tr><th>Уровень</th><th>Вероятность</th><th>Категория</th></tr>"
+             f"{rows}</table>" if rows else
+             f"<p>{html.escape(detect.get('reason', 'вероятность не рассчитана'))}</p>")
+
+    thresholds = data.get("thresholds", {})
+    ascor, morph = data.get("ascor") or {}, data.get("pam50_morphometry") or {}
+    extra = "".join(
+        f"<li>{name}: {'посчитано' if block.get('ok') else html.escape(str(block.get('reason')))}"
+        f"{' — ' + html.escape(block['citation']) if block.get('ok') and block.get('citation') else ''}</li>"
+        for name, block in (("aSCOR", ascor), ("морфометрия PAM50", morph))
+    )
+    limits = "".join(f"<li>{html.escape(x)}</li>"
+                     for x in data.get("interpretation_limits", []))
+    return (head
+            + f"<p>Измерено по серии <b>{html.escape(str(data.get('sequence_role')))}</b>, "
+              f"уровни {', '.join(str(v) for v in data.get('levels_covered_by_the_model', []))} "
+              f"в нумерации SCT (4 = C3/C4 … 7 = C6/C7).</p>"
+            + table
+            + f"<div class='box'>Пороги: «нет» &lt; {thresholds.get('compression_p_low')}, "
+              f"«возможно» до {thresholds.get('compression_p_high')}, выше — «да». "
+              f"{html.escape(str((data.get('citations') or {}).get('compression_probability', '')))}</div>"
+            + (f"<ul>{extra}</ul>" if extra else "")
+            + f"<div class='warn'><b>Границы применимости:</b><ul>{limits}</ul></div>")
 
 
 def _disc_section(ctx: Context) -> str:

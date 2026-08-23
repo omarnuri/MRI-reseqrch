@@ -55,7 +55,11 @@ class TestToolPath:
 
 
 class TestChildEnv:
-    def test_utf8_is_forced_so_rich_cannot_crash_on_a_legacy_console(self):
+    def test_utf8_is_forced_so_rich_cannot_crash_on_a_legacy_console(self, monkeypatch):
+        # The default only applies when the parent has not chosen an encoding, and
+        # some shells do (Claude Code exports "utf-8:surrogateescape"). Clearing it
+        # keeps this test about the default rather than about the developer's shell.
+        monkeypatch.delenv("PYTHONIOENCODING", raising=False)
         assert child_env()["PYTHONIOENCODING"] == "utf-8"
 
     def test_extra_variables_are_merged(self):

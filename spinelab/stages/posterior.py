@@ -140,6 +140,10 @@ def run(ctx: Context) -> StageResult:
         f"Bright-signal threshold derived from {reference_name}.",
         "Signal intensity in MR has no absolute units: only the two sides of the same "
         "image are compared, never one study against another.",
+        "No published grading scale exists for thoracic facet or costovertebral joints on "
+        "MRI. The ESSR-Arthritis consensus (Eur Radiol 2025) defines how to describe them, "
+        "not how to grade them, so the threshold here is this project's own and sorts "
+        "regions by brightness — it is not a severity score.",
     ]
     if suppression_ok is False:
         limits.insert(0,

@@ -13,9 +13,12 @@ from spinelab.analysis import (
     body_heights,
     bright_fraction,
     canal_area_profile,
+    classify_compression,
     curvature_metrics,
+    disc_labels_for_sct,
     facet_interface,
     dice,
+    sct_disc_value,
     label_agreement,
     longest_run,
     midline_index,
@@ -455,3 +458,84 @@ class TestDice:
     def test_empty_pair_is_zero_not_nan(self):
         z = np.zeros((3, 3, 3), dtype=bool)
         assert dice(z, z) == 0.0
+
+
+class TestSctDiscValue:
+    """SCT numbers a disc by the vertebra below it: C3/C4 is 4, C6/C7 is 7.
+
+    Getting this off by one would move every measurement one level and the result
+    would still look entirely plausible, which is why it is tested rather than
+    trusted. The two anchors come from the sct_detect_compression documentation.
+    """
+
+    @pytest.mark.parametrize("name,value", [
+        ("C2-C3", 3), ("C3-C4", 4), ("C4-C5", 5), ("C5-C6", 6), ("C6-C7", 7),
+        ("C7-T1", 8), ("T1-T2", 9), ("T12-L1", 20), ("L1-L2", 21), ("L5-S", 25),
+    ])
+    def test_known_levels(self, name, value):
+        assert sct_disc_value(name) == value
+
+    def test_separator_and_case_do_not_matter(self):
+        assert sct_disc_value("c5/c6") == sct_disc_value("C5-C6") == 6
+
+    def test_unknown_names_are_none_not_a_guess(self):
+        for name in ("", "sacrum", "disc_label_99", "X1-X2", None):
+            assert sct_disc_value(name) is None
+
+
+class TestDiscLabelsForSct:
+    """`-discfile` wants exactly one voxel per disc, at its posterior edge."""
+
+    def _volume(self):
+        # Two discs, canonical RAS: axis0 L->R, axis1 P->A, axis2 I->S.
+        vol = np.zeros((10, 12, 20), dtype=np.int32)
+        vol[3:7, 2:8, 5:8] = 64      # C3-C4 -> 4
+        vol[3:7, 3:9, 12:15] = 67    # C6-C7 -> 7
+        return vol
+
+    def test_one_voxel_per_disc_with_sct_numbering(self):
+        out = disc_labels_for_sct(self._volume(), L.TSS_DISCS)
+        assert sorted(int(v) for v in np.unique(out) if v) == [4, 7]
+        for value in (4, 7):
+            assert int((out == value).sum()) == 1
+
+    def test_the_voxel_sits_at_the_posterior_edge_and_mid_level(self):
+        out = disc_labels_for_sct(self._volume(), L.TSS_DISCS)
+        lr, ap, si = (int(c[0]) for c in np.nonzero(out == 4))
+        assert ap == 2          # posterior = lowest index on the P->A axis
+        assert si in (6, 7)     # middle of the 5..7 span
+        assert lr in (4, 5)     # middle of the 3..6 span
+
+    def test_labels_outside_the_map_are_dropped(self):
+        vol = np.zeros((6, 6, 6), dtype=np.int32)
+        vol[1:3, 1:3, 1:3] = 999
+        assert not disc_labels_for_sct(vol, L.TSS_DISCS).any()
+
+    def test_levels_can_be_restricted(self):
+        out = disc_labels_for_sct(self._volume(), L.TSS_DISCS, keep_values=range(4, 8))
+        assert sorted(int(v) for v in np.unique(out) if v) == [4, 7]
+        out = disc_labels_for_sct(self._volume(), L.TSS_DISCS, keep_values=(7,))
+        assert sorted(int(v) for v in np.unique(out) if v) == [7]
+
+    def test_an_empty_volume_gives_an_empty_label_file(self):
+        out = disc_labels_for_sct(np.zeros((4, 4, 4), dtype=np.int32), L.TSS_DISCS)
+        assert out.shape == (4, 4, 4) and not out.any()
+
+
+class TestClassifyCompression:
+    """Thresholds from the sct_detect_compression documentation: 0.345 and 0.451.
+
+    The boundaries are inclusive on the 'possible' side, so they are tested
+    explicitly — a `>` where a `>=` belongs silently upgrades a borderline level.
+    """
+
+    @pytest.mark.parametrize("p,expected", [
+        (0.0, "no"), (0.344, "no"),
+        (0.345, "possible"), (0.40, "possible"), (0.451, "possible"),
+        (0.452, "yes"), (1.0, "yes"),
+    ])
+    def test_categories(self, p, expected):
+        assert classify_compression(p) == expected
+
+    def test_missing_probability_is_none(self):
+        assert classify_compression(None) is None

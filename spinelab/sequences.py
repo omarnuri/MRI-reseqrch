@@ -50,6 +50,8 @@ _FATSAT_PATTERNS = (
     r"\bwater\b", r"\bfse?fs\b",
 )
 _IR_PATTERNS = (r"\bstir\b", r"\btirm\b", r"\bir\b", r"\bflair\b")
+#: Above this echo time a T2 sequence is a myelogram: only free fluid keeps signal.
+MYELOGRAPHY_TE_MS = 250.0
 
 
 def _norm(text: Any) -> str:
@@ -63,15 +65,21 @@ def _matches_any(text: str, patterns: Iterable[str]) -> bool:
 def is_localizer(meta: dict, n_slices: int | None = None) -> bool:
     """True for survey/localiser series, which are never analysis inputs.
 
-    Three independent signals, because any one of them misses real studies: the
-    vendor's name for the series, the DICOM ImageType, and the geometry (a thick,
-    short slab is a positioning scan whatever it is called).
+    Four independent signals, because any one of them misses real studies: the
+    vendor's name for the series, the DICOM ImageType, the geometry (a thick,
+    short slab is a positioning scan whatever it is called), and the timing.
+
+    The timing rule exists because the 2026-08-21 study arrived with every
+    SeriesDescription stripped by the exporter. Its AutoAlign scouts are 112
+    slices of 1.7 mm — thin and long, so no geometric rule touches them — and with
+    sidecar timings they classify as T1, which would have made a scout the T1
+    sagittal volume of the analysis.
     """
     text = _norm(meta.get("SeriesDescription", "")) + " " + _norm(meta.get("ProtocolName", ""))
     if _matches_any(text, [rf"\b{re.escape(t)}\b" for t in _LOCALIZER_TOKENS]):
         return True
     image_type = " ".join(str(x).lower() for x in (meta.get("ImageType") or []))
-    if "localizer" in image_type or "survey" in image_type:
+    if "localizer" in image_type or "survey" in image_type or "projection image" in image_type:
         return True
     thickness = meta.get("SliceThickness")
     try:
@@ -81,7 +89,62 @@ def is_localizer(meta: dict, n_slices: int | None = None) -> bool:
     if (thickness is not None and thickness >= _LOCALIZER_MIN_THICKNESS_MM
             and n_slices is not None and n_slices <= _LOCALIZER_MAX_SLICES):
         return True
-    return False
+    # A single slice is never a diagnostic spine volume: it is a MIP/projection
+    # slab (series 20 and 25 of that study are one 52 mm slab each).
+    if n_slices == 1:
+        return True
+    # No description, no timing: a derived or composed picture rather than an
+    # acquisition. Every real MR series records TR and TE.
+    if not text.strip() and _raw_float(meta.get("RepetitionTime")) is None \
+            and _raw_float(meta.get("EchoTime")) is None:
+        return True
+    return _is_survey_timing(meta)
+
+
+#: A survey scan is an ultrafast gradient echo. Diagnostic spin-echo spine series
+#: sit an order of magnitude above this: the fastest in the 2026-08-21 study is a
+#: T1 TSE at TR 478 ms.
+_SURVEY_MAX_TR_MS = 50.0
+_SURVEY_MAX_TE_MS = 10.0
+
+
+def _is_survey_timing(meta: dict) -> bool:
+    """Ultrafast gradient-echo timing, i.e. a positioning scan.
+
+    TR and TE are read together rather than through `_ms`, which decides the unit
+    of each value on its own: TR 4.2 is 4.2 ms in a DICOM header and 4.2 s in a
+    dcm2niix sidecar, and per-value guessing turns a 4.2 ms scout into a 4200 ms
+    T2. Taking the pair and keeping the reading in which both numbers are
+    physically plausible resolves it — TE 2380 ms does not exist, TE 2.38 ms does.
+
+    Fat-suppression evidence vetoes the rule: a Dixon/VIBE volume has the same
+    timing and is a diagnostic sequence (SPINEPS ships a model for it).
+    """
+    timing = _joint_timing_ms(meta)
+    if timing is None or has_fat_saturation(meta):
+        return False
+    tr, te = timing
+    return tr <= _SURVEY_MAX_TR_MS and te <= _SURVEY_MAX_TE_MS
+
+
+def _joint_timing_ms(meta: dict) -> tuple[float, float] | None:
+    """(TR, TE) in milliseconds, choosing the unit that makes both plausible."""
+    tr, te = _raw_float(meta.get("RepetitionTime")), _raw_float(meta.get("EchoTime"))
+    if tr is None or te is None:
+        return None
+    for scale in (1.0, 1000.0):  # header milliseconds first, then sidecar seconds
+        tr_ms, te_ms = tr * scale, te * scale
+        if 0.5 <= te_ms <= 500.0 and 1.0 <= tr_ms <= 20000.0:
+            return tr_ms, te_ms
+    return None
+
+
+def _raw_float(value: Any) -> float | None:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
 
 
 def has_fat_saturation(meta: dict) -> bool:
@@ -202,6 +265,11 @@ class Series:
     repetition_time_ms: float | None = None
     inversion_time_ms: float | None = None
     localizer: bool = False
+    z_range_mm: tuple[float, float] | None = None
+    """Superior-inferior extent of the volume in world (scanner) coordinates.
+
+    Two acquisitions belong to the same station when these overlap. Without it a
+    study that covers two levels of the spine is silently reduced to one."""
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -234,11 +302,13 @@ class Series:
             "repetition_time_ms": self.repetition_time_ms,
             "inversion_time_ms": self.inversion_time_ms,
             "localizer": self.localizer,
+            "z_range_mm": list(self.z_range_mm) if self.z_range_mm else None,
             "notes": self.notes,
         }
 
 
-def describe_series(meta: dict, *, path: str, name: str, shape, voxel_mm, normal=None) -> Series:
+def describe_series(meta: dict, *, path: str, name: str, shape, voxel_mm, normal=None,
+                    z_range_mm=None) -> Series:
     """Build a Series record from a dcm2niix sidecar plus image geometry."""
     plane = plane_from_direction(normal) if normal is not None else PLANE_UNKNOWN
     notes: list[str] = []
@@ -269,6 +339,7 @@ def describe_series(meta: dict, *, path: str, name: str, shape, voxel_mm, normal
         repetition_time_ms=_ms(meta.get("RepetitionTime"), "tr"),
         inversion_time_ms=_ms(meta.get("InversionTime"), "ti"),
         localizer=is_localizer(meta, n_slices=n_slices),
+        z_range_mm=(tuple(float(v) for v in z_range_mm) if z_range_mm else None),
         notes=notes,
     )
 
@@ -280,16 +351,20 @@ def pick(
     plane: str | None = None,
     fat_sat: bool | None = None,
     min_slices: int = 5,
+    allow_survey: bool = False,
 ) -> Series | None:
     """Best matching volume, or None.
 
     "Best" = not a localiser, enough slices, then most slices, then finest
     in-plane resolution. The old code took ``candidates[0]``, i.e. whatever
     dcm2niix happened to name first.
+
+    `allow_survey` exists for one case only: a level of the spine that the study
+    covers with nothing but positioning scans, selected deliberately by station.
     """
     cands = [
         s for s in series
-        if not s.localizer
+        if (allow_survey or not s.localizer)
         and s.n_slices >= min_slices
         and (contrast is None or s.contrast == contrast)
         and (plane is None or s.plane == plane)
@@ -316,13 +391,149 @@ def pick_fat_saturated(series: Sequence[Series], *, min_slices: int = 5,
     return pick(series, fat_sat=True, min_slices=min_slices)
 
 
-def build_picks(series: Sequence[Series], *, min_slices: int = 5) -> dict[str, Any]:
-    """The sequence choices the rest of the pipeline depends on."""
-    t2_sag = pick(series, contrast=CONTRAST_T2, plane=PLANE_SAGITTAL, fat_sat=False, min_slices=min_slices) \
-        or pick(series, contrast=CONTRAST_T2, plane=PLANE_SAGITTAL, min_slices=min_slices)
-    t1_sag = pick(series, contrast=CONTRAST_T1, plane=PLANE_SAGITTAL, min_slices=min_slices)
-    t2_ax = pick(series, contrast=CONTRAST_T2, plane=PLANE_AXIAL, min_slices=min_slices)
-    fatsat = pick_fat_saturated(series, min_slices=min_slices)
+@dataclass
+class Station:
+    """One craniocaudal block of a study: the volumes that image the same levels.
+
+    A session can cover two levels of the spine — the 2026-08-21 study does — and
+    every pick is a single volume per role. Without this grouping the analysis
+    silently reduces to whichever block has one more slice.
+    """
+
+    id: int
+    series: list[Series] = field(default_factory=list)
+    z_range_mm: tuple[float, float] = (0.0, 0.0)
+    unplaced: list[str] = field(default_factory=list)
+    """Names of volumes with no usable geometry; listed, never silently dropped."""
+    survey_only: bool = False
+    """This block exists only on positioning scans.
+
+    The 2026-08-21 study images the thoracic spine — the painful region — solely on
+    the AutoAlign survey (3D gradient echo, TR 4.2 / TE 2.4, 1.7 mm). Shape is there;
+    tissue contrast is not. Such a block is never chosen automatically and, when
+    chosen explicitly, every signal-based stage refuses to run on it."""
+
+    @property
+    def label(self) -> str:
+        return f"station {self.id}" + (" (survey only)" if self.survey_only else "")
+
+    @property
+    def extent_mm(self) -> float:
+        return self.z_range_mm[1] - self.z_range_mm[0]
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "z_range_mm": [round(v, 1) for v in self.z_range_mm],
+            "extent_mm": round(self.extent_mm, 1),
+            "survey_only": self.survey_only,
+            "series": [s.name for s in self.series],
+            "sequences": sorted({f"{s.sequence_label} {s.plane}" for s in self.series}),
+            "unplaced": list(self.unplaced),
+        }
+
+
+def _overlap_groups(series: Sequence[Series]) -> list[tuple[list[Series], float, float]]:
+    """Volumes whose superior-inferior extents overlap, merged transitively."""
+    groups: list[tuple[list[Series], float, float]] = []
+    for s in sorted(series, key=lambda s: -s.z_range_mm[1]):
+        lo, hi = float(s.z_range_mm[0]), float(s.z_range_mm[1])
+        for i, (members, g_lo, g_hi) in enumerate(groups):
+            if lo <= g_hi and hi >= g_lo:
+                groups[i] = (members + [s], min(g_lo, lo), max(g_hi, hi))
+                break
+        else:
+            groups.append(([s], lo, hi))
+    groups.sort(key=lambda g: -g[2])  # superior block first
+    return groups
+
+
+def _survey_groups(series: Sequence[Series]) -> list[tuple[list[Series], float, float]]:
+    """Positioning scans grouped by acquisition block, not by overlap.
+
+    Overlap is the wrong relation here. A session runs the survey once per table
+    position, and a long locator that reaches across two of them would chain all of
+    them into a single 1100 mm "station" — which then makes the pick between three
+    different levels of the spine arbitrary. Blocks are therefore seeded by the
+    widest volume, and a volume joins a block only if it mostly lies inside it.
+    """
+    groups: list[tuple[list[Series], float, float]] = []
+    for s in sorted(series, key=lambda s: -(s.z_range_mm[1] - s.z_range_mm[0])):
+        lo, hi = float(s.z_range_mm[0]), float(s.z_range_mm[1])
+        span = max(hi - lo, 1e-6)
+        for i, (members, g_lo, g_hi) in enumerate(groups):
+            inside = min(hi, g_hi) - max(lo, g_lo)
+            if inside / span >= 0.8:
+                groups[i] = (members + [s], min(g_lo, lo), max(g_hi, hi))
+                break
+        else:
+            groups.append(([s], lo, hi))
+    groups.sort(key=lambda g: -g[2])
+    return groups
+
+
+def group_stations(series: Sequence[Series], *, min_slices: int = 5,
+                   include_survey: bool = True) -> list[Station]:
+    """Split a study into craniocaudal blocks, numbered from the head down.
+
+    Two volumes belong together when their superior-inferior extents overlap; the
+    relation is applied transitively, so an axial block that overlaps only part of
+    a sagittal stack still joins it. Volumes without geometry cannot be placed, so
+    they are attached to every station's `unplaced` list rather than dropped.
+
+    Diagnostic and survey volumes are grouped separately and the diagnostic blocks
+    are numbered first. Grouping them together would collapse the study into one
+    station, because a whole-spine positioning scan overlaps everything — and it
+    would also hide the fact that a level is covered *only* by a survey scan, which
+    is exactly what the operator needs to know.
+    """
+    long_enough = [s for s in series if s.n_slices >= min_slices and s.z_range_mm]
+    diagnostic = [s for s in long_enough if not s.localizer]
+    survey = [s for s in long_enough if s.localizer]
+    unplaced = [s.name for s in series
+                if s.n_slices >= min_slices and not s.z_range_mm and not s.localizer]
+
+    stations = [
+        Station(id=i, series=members, z_range_mm=(lo, hi), unplaced=list(unplaced))
+        for i, (members, lo, hi) in enumerate(_overlap_groups(diagnostic), start=1)
+    ]
+    if include_survey:
+        stations += [
+            Station(id=len(stations) + i, series=members, z_range_mm=(lo, hi),
+                    survey_only=True)
+            for i, (members, lo, hi) in enumerate(_survey_groups(survey), start=1)
+        ]
+    return stations
+
+
+def build_picks(series: Sequence[Series], *, min_slices: int = 5,
+                station: Station | None = None,
+                stations: Sequence[Station] | None = None) -> dict[str, Any]:
+    """The sequence choices the rest of the pipeline depends on.
+
+    With `station` given, only that block's volumes are candidates and the blocks
+    left unanalysed are named in the limitations, with the flag that selects them.
+    """
+    if station is not None:
+        if stations is None:
+            stations = group_stations(series, min_slices=min_slices)
+        series = list(station.series)
+
+    if station is not None and station.survey_only:
+        # Contrast means nothing here — every volume is the same gradient echo —
+        # so the choice is by plane and coverage, and the roles are filled only so
+        # the segmentation stages have an input. Nothing signal-based may follow.
+        t2_sag = pick(series, plane=PLANE_SAGITTAL, min_slices=min_slices, allow_survey=True)
+        t1_sag = None
+        t2_ax = pick(series, plane=PLANE_AXIAL, min_slices=min_slices, allow_survey=True)
+        fatsat = None
+    else:
+        t2_sag = pick(series, contrast=CONTRAST_T2, plane=PLANE_SAGITTAL, fat_sat=False, min_slices=min_slices) \
+            or pick(series, contrast=CONTRAST_T2, plane=PLANE_SAGITTAL, min_slices=min_slices)
+        t1_sag = pick(series, contrast=CONTRAST_T1, plane=PLANE_SAGITTAL, min_slices=min_slices)
+        t2_ax = pick(series, contrast=CONTRAST_T2, plane=PLANE_AXIAL, min_slices=min_slices)
+        fatsat = pick_fat_saturated(series, min_slices=min_slices)
 
     picks = {
         "T2_SAG": t2_sag.path if t2_sag else None,
@@ -331,8 +542,43 @@ def build_picks(series: Sequence[Series], *, min_slices: int = 5) -> dict[str, A
         "FATSAT_BEST": fatsat.path if fatsat else None,
         "FATSAT_PLANE": fatsat.plane if fatsat else None,
         "FATSAT_LABEL": fatsat.sequence_label if fatsat else None,
+        "FATSAT_TE_MS": fatsat.echo_time_ms if fatsat else None,
+        "station": station.id if station else None,
+        "survey_only": bool(station and station.survey_only),
     }
     limitations = []
+    if picks["survey_only"]:
+        limitations.append(
+            "THIS BLOCK IS COVERED ONLY BY POSITIONING SCANS (fast 3D gradient echo). "
+            "Shape can be measured — vertebral heights, wedge angles, curvature — and "
+            "even that depends on segmentation models working off their training "
+            "distribution, so the masks must be inspected. Everything signal-based "
+            "(marrow, disc signal, facet comparison, texture) is NOT assessable and "
+            "those stages refuse to run.")
+    if fatsat is not None and (fatsat.echo_time_ms or 0) >= MYELOGRAPHY_TE_MS:
+        # The gate this pipeline was written around is a STIR at TE ~ 60-100 ms.
+        # A fat-suppressed 3D SPACE at TE 437 ms is an MR myelogram: bright where
+        # there is free fluid, near-silent in marrow. It passes the fat-sat check
+        # and must not be read as if it were a STIR.
+        limitations.append(
+            f"the fat-suppressed series is heavily T2-weighted (TE "
+            f"{fatsat.echo_time_ms:.0f} ms, myelography-type): it shows free fluid "
+            "well and bone-marrow oedema poorly — not a substitute for STIR/TIRM")
+    if station is not None and stations and len(stations) > 1:
+        others = [st for st in stations if st.id != station.id]
+        listing = "; ".join(
+            f"{st.label} ({st.z_range_mm[0]:.0f}…{st.z_range_mm[1]:.0f} mm, "
+            f"{len(st.series)} series)" for st in others)
+        limitations.append(
+            f"this study covers {len(stations)} craniocaudal stations; only "
+            f"{station.label} is analysed in this run. Not analysed: {listing}. "
+            f"Run again with --station {others[0].id} for the next one.")
+        uncovered = _diagnostic_gaps(stations)
+        for lo, hi in uncovered:
+            limitations.append(
+                f"no diagnostic series covers {lo:.0f}…{hi:.0f} mm ({hi - lo:.0f} mm of "
+                "spine) — between the diagnostic blocks. Any finding there would have to "
+                "come from a positioning scan.")
     if not t2_sag:
         limitations.append("no usable sagittal T2 — segmentation stages cannot run")
     if not fatsat:
@@ -365,6 +611,21 @@ def build_picks(series: Sequence[Series], *, min_slices: int = 5) -> dict[str, A
 
     picks["limitations"] = limitations
     return picks
+
+
+def _diagnostic_gaps(stations: Sequence[Station]) -> list[tuple[float, float]]:
+    """Craniocaudal ranges between diagnostic blocks, i.e. levels nobody imaged well.
+
+    This is the number that matters when the symptom points at a level: the
+    2026-08-21 study leaves ~220 mm between the cervical and lumbar blocks.
+    """
+    blocks = sorted((st.z_range_mm for st in stations if not st.survey_only),
+                    key=lambda r: r[1], reverse=True)
+    gaps = []
+    for upper, lower in zip(blocks, blocks[1:]):
+        if upper[0] > lower[1]:
+            gaps.append((lower[1], upper[0]))
+    return gaps
 
 
 def _split_series(series: Sequence[Series], min_slices: int = 5) -> dict:

@@ -331,6 +331,89 @@ class TestWithoutFatSuppression:
         assert "Этап не дал результата" in html
 
 
+class TestSctStagesWithoutSct:
+    """SCT is a 3 GB optional install. Its absence must be a sentence, not a crash."""
+
+    def _run(self, tmp_path, stages):
+        cfg = seed_study(tmp_path, fatsat=True)
+        cfg.stages = stages
+        return cfg, run_pipeline(cfg, log=lambda *_: None)
+
+    def test_segmentation_says_how_to_get_it(self, tmp_path):
+        _, results = self._run(tmp_path, ("seg_sct",))
+        assert results["seg_sct"].status.value == "skipped"
+        assert "spinelab setup" in results["seg_sct"].reason
+
+    def test_the_calibrated_stage_skips_when_there_are_no_masks(self, tmp_path):
+        _, results = self._run(tmp_path, ("seg_sct", "compression"))
+        assert results["compression"].status.value == "skipped"
+        assert results["compression"].data == {}
+
+    def test_the_report_keeps_the_section_and_says_it_did_not_run(self, tmp_path):
+        cfg, _ = self._run(tmp_path, ("seg_sct", "compression", "report"))
+        html = (cfg.results_dir / "report.html").read_text(encoding="utf-8")
+        assert "Шейный канал: пороги из внешних когорт" in html
+        assert "ПОРОГ ИЗ ВНЕШНЕЙ КОГОРТЫ" in html
+        assert "Этап не дал результата" in html
+
+
+class TestSurveyOnlyStation:
+    """A level covered by nothing but positioning scans.
+
+    The thoracic spine in the 2026-08-21 study is exactly that. Shape may still be
+    measured; anything derived from signal intensity may not, because a fast
+    gradient echo without fat suppression says nothing about tissue.
+    """
+
+    def _run(self, tmp_path):
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, bright_side="right")
+        cfg.stages = ("geometry", "marrow", "posterior", "radiomics", "report")
+        path = cfg.stage_dir / "ingest.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["data"]["picks"]["survey_only"] = True
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return cfg, run_pipeline(cfg, log=lambda *_: None)
+
+    def test_signal_based_stages_refuse(self, tmp_path):
+        _, results = self._run(tmp_path)
+        for name in ("marrow", "posterior", "radiomics"):
+            assert results[name].status.value == "skipped", name
+            assert "positioning scans" in results[name].reason, name
+
+    def test_shape_based_stages_still_run(self, tmp_path):
+        _, results = self._run(tmp_path)
+        assert results["geometry"].status.value in ("ok", "partial")
+        assert results["geometry"].data["levels_measured"]
+
+
+class TestMyelographyWeightedFatSat:
+    """Fat suppression is necessary but not sufficient for a marrow screen.
+
+    The 2026-08-21 study's only fat-suppressed series is a 3D SPACE at TE 437 ms —
+    an MR myelogram. Marrow is signal-free on it by design, so screening inside the
+    vertebral bodies would measure noise and rank it.
+    """
+
+    def _run(self, tmp_path, te_ms):
+        cfg = seed_study(tmp_path, fatsat=True, bright_level=18, bright_side="right")
+        cfg.stages = ("marrow",)
+        path = cfg.stage_dir / "ingest.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["data"]["picks"]["FATSAT_TE_MS"] = te_ms
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return run_pipeline(cfg, log=lambda *_: None)
+
+    def test_marrow_refuses_on_a_myelography_echo_time(self, tmp_path):
+        results = self._run(tmp_path, 437.0)
+        assert results["marrow"].status.value == "skipped"
+        assert "myelography-weighted" in results["marrow"].reason
+        assert results["marrow"].data == {}
+
+    def test_a_stir_echo_time_still_runs(self, tmp_path):
+        results = self._run(tmp_path, 90.0)
+        assert results["marrow"].status.value in ("ok", "partial")
+
+
 class TestRegisteredMasks:
     """When `register` has moved the masks, downstream stages must use those."""
 

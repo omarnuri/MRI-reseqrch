@@ -33,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--cache", default=None,
                        help="persistent weights cache (put this on Google Drive)")
     run_p.add_argument("--subject", default="anon", help="subject id used in outputs")
+    run_p.add_argument("--station", type=int, default=0,
+                       help="which craniocaudal block of the study to analyse (1 = the "
+                            "most superior). Default: the block with the most series. "
+                            "Each station writes to results/station-N")
     run_p.add_argument("--only", default=None,
                        help=f"comma-separated subset of: {','.join(DEFAULT_STAGES)}")
     run_p.add_argument("--skip", default=None, help="comma-separated stages to leave out")
@@ -67,6 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
     setup_p.add_argument("--smoke", action="store_true",
                         help="with --check-only: also start each CLI to confirm it runs")
     setup_p.add_argument("--no-apt", action="store_true", help="skip apt-get")
+    setup_p.add_argument("--sct", action="store_true",
+                        help="also install Spinal Cord Toolbox (~3 GB) — needed for the "
+                             "cervical canal measurements with published cut-offs")
+    setup_p.add_argument("--work", default="/content/spine_work",
+                        help="workspace, where SCT is installed with --sct")
+    setup_p.add_argument("--cache", default=None,
+                        help="persistent cache; with --sct the models are kept here")
 
     deid_p = sub.add_parser("deid", help="write a de-identified copy of a DICOM study")
     deid_p.add_argument("--dicom", required=True)
@@ -204,6 +215,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"missing: {', '.join(problems)}")
         else:
             state = install(segmentation=segmentation, force=args.force, apt=not args.no_apt)
+        if args.sct:
+            from .envsetup import install_sct
+
+            sct = install_sct(Path(args.work),
+                              Path(args.cache) if args.cache else None,
+                              force=args.force)
+            print(f"   SCT: {'installed at ' + sct['root'] if sct['installed'] else sct['reason']}")
+            if sct["installed"] and sct["missing_binaries"]:
+                print(f"   ! SCT commands not found: {', '.join(sct['missing_binaries'])}")
         return 0 if state["ready"] else 1
 
     if args.command == "find":
@@ -246,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     config = Config(
         dicom_source=args.dicom,
         subject_id=args.subject,
+        station=args.station,
         work_dir=Path(args.work),
         cache_dir=Path(args.cache) if args.cache else None,
         stages=_stage_list(args.only, args.skip),

@@ -16,14 +16,16 @@ thresholds) and the reasons behind them.
 * `notebooks/legacy/` — the old 57-cell notebook. Some of its stated conclusions
   are formally retracted in its own text; do not reuse them.
 * `docs/` — bug ledger, stack review, clinical scope, privacy.
-* `tests/` — 97 tests, no GPU, no patient data, ~1 s.
+* `tests/` — 333 tests, no GPU, no patient data, ~15 s.
 
 ## Commands
 
 ```bash
 python -m pytest -q
 python -m spinelab run --dicom /path/study.zip --cache ~/spinelab-cache
+python -m spinelab run --dicom /path/study.zip --station 2   # one station per run
 python -m spinelab audit --dicom /path/dicom
+python -m spinelab setup --sct --cache ~/spinelab-cache      # Spinal Cord Toolbox, ~3 GB
 ```
 
 Two local venvs, on purpose:
@@ -47,6 +49,9 @@ so it finds code bugs but is not how a real run should be made.
   covers it; the repository history already contains one archive with PHI —
   see `docs/PRIVACY.md`, unresolved and owner-action-only.
 * A `HEURISTIC`-level number may not be phrased as a finding anywhere.
+* `CALIBRATED` is the only level allowed to say which side of a threshold a value falls
+  on, and only when the cohort the threshold came from travels with the number. Today
+  that is the Spinal Cord Toolbox cervical measures and nothing else.
 * Missing sequence → `SkipStage` with the reason, never a substitute number.
 * Do not claim a segmentation stage works without an actual Colab GPU run.
 

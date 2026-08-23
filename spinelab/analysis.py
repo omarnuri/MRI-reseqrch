@@ -502,6 +502,92 @@ def canal_area_profile(canal_mask: np.ndarray, voxel_area_mm2: float,
 
 
 # --------------------------------------------------------------------------
+# Spinal Cord Toolbox interop
+# --------------------------------------------------------------------------
+
+#: Spinal Cord Toolbox numbers a disc by the vertebra *below* it, counting C1=1 …
+#: C7=7, T1=8 … T12=19, L1=20 … L5=24, S1=25. So C3/C4 is 4 and C6/C7 is 7 — the
+#: two anchors stated in the sct_detect_compression documentation, which is the
+#: only place the convention is pinned down for the levels this project needs.
+_SCT_VERTEBRA_INDEX = {
+    **{f"C{i}": i for i in range(1, 8)},
+    **{f"T{i}": 7 + i for i in range(1, 13)},
+    **{f"L{i}": 19 + i for i in range(1, 6)},
+    "S": 25, "S1": 25,
+}
+
+#: sct_detect_compression thresholds (Horáková 2022, logistic model on cervical
+#: canal/cord morphometry; AUC 0.947 on an independent DCM cohort). Both bounds are
+#: inclusive on the "possible" side, as documented.
+COMPRESSION_P_LOW = 0.345
+COMPRESSION_P_HIGH = 0.451
+
+
+def sct_disc_value(level_name) -> int | None:
+    """SCT label value for a disc named like "C3-C4", or None if unrecognised.
+
+    Returning None rather than a fallback is deliberate: a disc file with a wrong
+    number produces measurements at the wrong level that look completely normal.
+    """
+    if not level_name:
+        return None
+    parts = str(level_name).upper().replace("/", "-").split("-")
+    if len(parts) != 2:
+        return None
+    return _SCT_VERTEBRA_INDEX.get(parts[1].strip())
+
+
+def disc_labels_for_sct(disc_volume: np.ndarray, level_map: dict,
+                        keep_values=None) -> np.ndarray:
+    """One single voxel per disc, at its posterior edge, numbered the SCT way.
+
+    `sct_detect_compression -discfile` wants exactly one voxel per level, placed
+    "at the posterior edge of the intervertebral disc". In canonical RAS the
+    posterior edge is the lowest index on the anterior-posterior axis; among the
+    voxels there, the one closest to the centre of the disc in the other two axes
+    is chosen, so the point is reproducible rather than whichever voxel numpy
+    happened to list first.
+
+    `keep_values` optionally restricts the output to a set of SCT values — the
+    compression model only covers 4…7 and a disc file carrying more levels than a
+    tool supports is a source of silent mismatches.
+    """
+    data = np.asarray(disc_volume)
+    out = np.zeros(data.shape, dtype=np.int16)
+    wanted = None if keep_values is None else {int(v) for v in keep_values}
+
+    for label in np.unique(data):
+        if label == 0:
+            continue
+        value = sct_disc_value(level_map.get(int(label)))
+        if value is None or (wanted is not None and value not in wanted):
+            continue
+        coords = np.array(np.nonzero(data == label))
+        if coords.size == 0:
+            continue
+        posterior = coords[AP_AXIS].min()
+        on_edge = coords[:, coords[AP_AXIS] == posterior]
+        centre = np.median(coords, axis=1)
+        distance = (np.abs(on_edge[LR_AXIS] - centre[LR_AXIS])
+                    + np.abs(on_edge[SI_AXIS] - centre[SI_AXIS]))
+        pick = on_edge[:, int(np.argmin(distance))]
+        out[tuple(int(v) for v in pick)] = value
+    return out
+
+
+def classify_compression(probability) -> str | None:
+    """"no" / "possible" / "yes" for a compression probability from SCT."""
+    if probability is None:
+        return None
+    p = float(probability)
+    if p < COMPRESSION_P_LOW:
+        return "no"
+    if p <= COMPRESSION_P_HIGH:
+        return "possible"
+    return "yes"
+
+
+# --------------------------------------------------------------------------
 # Agreement
 # --------------------------------------------------------------------------
 

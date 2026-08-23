@@ -11,7 +11,7 @@ from ..dicom_audit import audit
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
 from ..runlog import event, get_logger, log_command
-from ..sequences import build_picks, describe_series
+from ..sequences import Station, build_picks, describe_series, group_stations
 from ..utils import child_env, clean_reason, read_json, tool_path, write_json
 
 log = get_logger(__name__)
@@ -175,7 +175,20 @@ def run(ctx: Context) -> StageResult:
         log.info("series: %-28s %-14s %-9s %3d slices %s",
                  (s.description or s.name)[:28], s.sequence_label, s.plane, s.n_slices,
                  "[localizer]" if s.localizer else "")
-    picks = build_picks(series, min_slices=cfg.min_series_slices)
+
+    stations = group_stations(series, min_slices=cfg.min_series_slices)
+    chosen = _choose_station(stations, cfg.station)
+    for st in stations:
+        log.info("%s: %.0f…%.0f mm, %d series%s", st.label, st.z_range_mm[0],
+                 st.z_range_mm[1], len(st.series), "  <- analysed" if st is chosen else "")
+    event("stations", n=len(stations), selected=(chosen.id if chosen else None),
+          stations=[st.to_dict() for st in stations])
+    write_json(cfg.intermediate_dir / "stations.json",
+               {"selected": chosen.id if chosen else None,
+                "stations": [st.to_dict() for st in stations]})
+
+    picks = build_picks(series, min_slices=cfg.min_series_slices,
+                        station=chosen, stations=stations)
     log.info("picks: %s", {k: (Path(v).name if isinstance(v, str) and v.endswith(".gz") else v)
                            for k, v in picks.items() if k != "limitations"})
     for limitation in picks.get("limitations", []):
@@ -206,6 +219,25 @@ def run(ctx: Context) -> StageResult:
         },
         artifacts=[str(cfg.intermediate_dir / "sequence_inventory.json")],
     )
+
+
+def _choose_station(stations: list[Station], requested: int) -> Station | None:
+    """Which craniocaudal block this run analyses.
+
+    An explicit `--station` wins. Otherwise the block with the most diagnostic
+    volumes is used, ties going to the superior one — and `build_picks` names the
+    blocks left out, so a default choice is never a silent one.
+    """
+    if not stations:
+        return None
+    if requested:
+        for st in stations:
+            if st.id == requested:
+                return st
+        raise SkipStage(
+            f"--station {requested} does not exist; this study has "
+            f"{len(stations)} ({', '.join(st.label for st in stations)})")
+    return max(stations, key=lambda st: (len(st.series), -st.id))
 
 
 def _recover_split_series(cfg, dicom_root: Path, series: list) -> list:
@@ -270,7 +302,8 @@ def _describe_file(path: Path):
     header = _load_header(path)
     return describe_series(read_json(sidecar, {}) or {}, path=str(path), name=path.name,
                            shape=header["shape"], voxel_mm=header["zooms"],
-                           normal=header["slice_normal"])
+                           normal=header["slice_normal"],
+                           z_range_mm=header["z_range_mm"])
 
 
 def _load_header(path: Path) -> dict:
@@ -292,4 +325,26 @@ def _load_header(path: Path) -> dict:
     normal = (step / norm).tolist() if norm > 1e-9 else None
     return {"shape": tuple(int(s) for s in img.shape[:3]),
             "zooms": tuple(float(z) for z in img.header.get_zooms()[:3]),
-            "slice_normal": normal}
+            "slice_normal": normal,
+            "z_range_mm": _z_range(affine, img.shape[:3])}
+
+
+def _z_range(affine, shape) -> tuple[float, float] | None:
+    """Superior-inferior extent of the volume in world millimetres.
+
+    The eight corners of the voxel grid are mapped through the affine and the
+    z-component is taken, so the answer is right for an oblique acquisition too.
+    This is what decides which volumes image the same part of the spine.
+    """
+    import itertools
+
+    import numpy as np
+
+    if len(shape) < 3:
+        return None
+    corners = np.array([
+        [x, y, z, 1.0]
+        for x, y, z in itertools.product(*((0, int(n) - 1) for n in shape[:3]))
+    ], dtype=float)
+    zs = (np.asarray(affine, dtype=float) @ corners.T)[2]
+    return float(zs.min()), float(zs.max())

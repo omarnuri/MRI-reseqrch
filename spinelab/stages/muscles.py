@@ -79,6 +79,9 @@ def run(ctx: Context) -> StageResult:
             "published norms; the left/right ratio inside one study is the usable part.",
             "Side asymmetry has many benign causes (handedness, sport, positioning) and by "
             "itself indicates nothing about the source of pain.",
+            "The reporting threshold is this project's own choice, not a clinical cut-off: "
+            "no published normative distribution of paraspinal asymmetry applies to this "
+            "study's field of view.",
         ],
     }
     write_json(cfg.intermediate_dir / "muscles.json", payload)

@@ -124,9 +124,9 @@ def _registry() -> dict[str, StageFn]:
     # Imported lazily so `import spinelab.pipeline` stays cheap and so a missing
     # optional dependency only breaks the stage that needs it.
     from .stages import (
-        agreement, canal, crosscheck, discs, facets_axial, fatsat_qc, geometry,
-        ingest, marrow, muscles, posterior, radiomics, register, report,
-        seg_spineps, seg_totalsegmentator, seg_totalspineseg,
+        agreement, canal, compression, crosscheck, discs, facets_axial, fatsat_qc,
+        geometry, ingest, marrow, muscles, posterior, radiomics, register, report,
+        seg_sct, seg_spineps, seg_totalsegmentator, seg_totalspineseg,
     )
 
     return {
@@ -134,6 +134,7 @@ def _registry() -> dict[str, StageFn]:
         "spineps": seg_spineps.run,
         "totalspineseg": seg_totalspineseg.run,
         "totalsegmentator": seg_totalsegmentator.run,
+        "seg_sct": seg_sct.run,
         "register": register.run,
         "fatsat_qc": fatsat_qc.run,
         "crosscheck": crosscheck.run,
@@ -143,11 +144,31 @@ def _registry() -> dict[str, StageFn]:
         "marrow": marrow.run,
         "posterior": posterior.run,
         "canal": canal.run,
+        "compression": compression.run,
         "discs": discs.run,
         "radiomics": radiomics.run,
         "agreement": agreement.run,
         "report": report.run,
     }
+
+
+#: Stages whose output is a statement about signal intensity. On a positioning scan
+#: — fast gradient echo, no fat suppression, no T2 weighting — those numbers describe
+#: the sequence, not the patient, so the stages are refused rather than qualified.
+#: Shape-based stages (geometry, canal, muscles) and the segmentation they need are
+#: not on this list: they can run, with the masks checked by eye.
+SIGNAL_STAGES = frozenset({"marrow", "posterior", "discs", "radiomics", "facets_axial"})
+
+
+def _refuse_signal_stage_on_a_survey_block(ctx: "Context", name: str) -> None:
+    if name not in SIGNAL_STAGES:
+        return
+    picks = ctx.stage_data("ingest").get("picks", {})
+    if picks.get("survey_only"):
+        raise SkipStage(
+            "this station is covered only by positioning scans (fast gradient echo, "
+            "no fat suppression, no T2 weighting) — signal-based measurements there "
+            "describe the sequence, not the tissue")
 
 
 def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
@@ -225,6 +246,7 @@ def run_pipeline(config: Config, log=print) -> dict[str, StageResult]:
             logger.info("cache invalidated from %s onwards (this stage re-ran)", name)
         t0 = time.time()
         try:
+            _refuse_signal_stage_on_a_survey_block(ctx, name)
             result = registry[name](ctx)
         except SkipStage as exc:
             result = StageResult(name=name, status=Status.SKIPPED, reason=str(exc))

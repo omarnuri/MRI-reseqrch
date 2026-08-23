@@ -55,6 +55,9 @@ def run(ctx: Context) -> StageResult:
             "clinical stenosis is defined on absolute area plus cord signal plus symptoms.",
             "A single narrow slice is often a segmentation artefact at a disc level; the "
             "10th-percentile area is the more stable number.",
+            "The narrowing threshold is this project's own, applied to the study's own "
+            "median. Published cut-offs exist only for the cervical canal and are used "
+            "separately in the `compression` stage, with the cohort they came from.",
         ],
     }
     write_json(cfg.intermediate_dir / "canal.json", payload)

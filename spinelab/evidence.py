@@ -16,6 +16,13 @@ from enum import Enum
 
 
 class Evidence(str, Enum):
+    #: A value with a **published cut-off validated on an external clinical cohort**.
+    #: The only level allowed to say which side of a threshold a number falls on,
+    #: because it is the only one where the threshold came from somebody else's
+    #: patients rather than from this study's own distribution. So far: the cervical
+    #: canal measures in Spinal Cord Toolbox (compression probability, aSCOR).
+    #: The cohort and the citation travel with every such number into the report.
+    CALIBRATED = "calibrated"
     #: Output of a peer-reviewed, pretrained segmentation model run with its real
     #: published weights (SPINEPS, TotalSpineSeg, TotalSegmentator).
     MODEL = "model"
@@ -31,6 +38,7 @@ class Evidence(str, Enum):
 
 
 LABELS_RU = {
+    Evidence.CALIBRATED: "ПОРОГ ИЗ ВНЕШНЕЙ КОГОРТЫ",
     Evidence.MODEL: "ВАЛИДИРОВАННАЯ МОДЕЛЬ",
     Evidence.MEASUREMENT: "ИЗМЕРЕНИЕ ПО МАСКЕ",
     Evidence.HEURISTIC: "ЭВРИСТИКА — СКРИНИНГ, НЕ ДИАГНОЗ",
@@ -38,6 +46,7 @@ LABELS_RU = {
 }
 
 COLORS = {
+    Evidence.CALIBRATED: "#0ea5e9",
     Evidence.MODEL: "#10b981",
     Evidence.MEASUREMENT: "#f59e0b",
     Evidence.HEURISTIC: "#ef4444",

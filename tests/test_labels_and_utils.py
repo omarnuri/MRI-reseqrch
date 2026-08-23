@@ -8,7 +8,40 @@ import numpy as np
 import pytest
 
 from spinelab import labels as L
-from spinelab.utils import clean_reason, find_outputs, read_json, to_jsonable, write_json
+from spinelab.utils import (
+    clean_reason,
+    find_outputs,
+    parse_cli_flags,
+    read_json,
+    to_jsonable,
+    write_json,
+)
+
+
+class TestParseCliFlags:
+    """Commands are built from what the installed tool accepts, not from its docs."""
+
+    HELP = """
+    usage: sct_detect_compression [-h] -s SEG -discfile FILE [-o OUTPUT] [-v {0,1,2}]
+
+    optional arguments:
+      -h, --help     show this help message and exit
+      -s SEG         spinal cord segmentation
+      -discfile FILE labels, one voxel per disc
+      --qc-dataset   name of the dataset
+    """
+
+    def test_finds_single_and_double_dash_options(self):
+        flags = parse_cli_flags(self.HELP)
+        assert {"-s", "-discfile", "-o", "-v", "-h", "--help", "--qc-dataset"} <= flags
+
+    def test_does_not_invent_flags_from_prose(self):
+        flags = parse_cli_flags(self.HELP)
+        assert "-i" not in flags and "-ascor" not in flags
+
+    def test_empty_help_is_an_empty_set_not_a_crash(self):
+        assert parse_cli_flags(None) == set()
+        assert parse_cli_flags("") == set()
 
 
 class TestVertebraNaming:

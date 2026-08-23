@@ -31,6 +31,7 @@ from .. import labels as L
 from ..analysis import screen_region
 from ..evidence import Evidence, Status
 from ..pipeline import Context, SkipStage, StageResult
+from ..sequences import MYELOGRAPHY_TE_MS
 from ..utils import load_canonical, resample_mask_to, write_json
 
 
@@ -44,6 +45,17 @@ def run(ctx: Context) -> StageResult:
             "assessable (a bright-voxel count on plain T2 cannot distinguish oedema "
             "from normal fatty marrow)"
         )
+    # Fat suppression is necessary but not sufficient. A fat-suppressed 3D SPACE at
+    # TE 437 ms (the 2026-08-21 study's only fat-suppressed series) is an MR
+    # myelogram: at that echo time only free fluid keeps signal and marrow is dark
+    # by design, so an intensity screen inside the vertebral bodies measures noise.
+    fatsat_te = picks.get("FATSAT_TE_MS")
+    if fatsat_te is not None and float(fatsat_te) >= MYELOGRAPHY_TE_MS:
+        raise SkipStage(
+            f"the only fat-suppressed series is myelography-weighted (TE {float(fatsat_te):.0f} "
+            f"ms >= {MYELOGRAPHY_TE_MS:.0f} ms): marrow is intentionally signal-free on it, so "
+            "bone-marrow oedema is NOT assessable. A STIR/TIRM (TE ~60-100 ms) is what this "
+            "screen needs.")
 
     spineps = ctx.stage_data("spineps")
     instance_masks = [Path(p) for p in spineps.get("instance_masks", [])]

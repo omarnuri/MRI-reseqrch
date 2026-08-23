@@ -86,6 +86,54 @@ APT_PACKAGES = ("dcm2niix", "unzip")
 #: CLI entry points the pipeline shells out to.
 BINARIES = ("dcm2niix", "spineps", "totalspineseg")
 
+# --------------------------------------------------------------------------
+# Spinal Cord Toolbox
+# --------------------------------------------------------------------------
+#
+# SCT is not a pip package: it is a shell installer that builds its own Python
+# environment, so it gets its own install path here rather than a line in
+# SEGMENTATION_PACKAGES.
+#
+# It is worth the extra machinery for one reason: `sct_detect_compression` and
+# `sct_compute_ascor` are the only measurements in this project whose thresholds
+# come from somebody else's cohort instead of from this study's own distribution.
+SCT_REPO = "https://github.com/spinalcordtoolbox/spinalcordtoolbox"
+#: Pinned so a run is reproducible. 7.3 is the release that contains every command
+#: this pipeline calls (published 2026-05-09, verified via the GitHub Releases API).
+SCT_VERSION = "7.3"
+#: Model names as `sct_deepseg` knows them. The canal model is ~1 GB and is the
+#: reason the model directory has to live in the Drive cache.
+SCT_MODELS = ("spinalcord", "sc_canal_t2", "graymatter")
+#: CLIs the pipeline calls. Presence of the first is what "SCT is installed" means.
+SCT_BINARIES = ("sct_deepseg", "sct_detect_compression", "sct_compute_compression",
+                "sct_compute_ascor")
+
+
+def sct_paths(work_dir, cache_dir=None) -> dict:
+    """Where SCT and its models go.
+
+    The toolbox itself is installed locally and the *models* are kept in the Drive
+    cache, not the other way round. Running a conda environment off a FUSE mount is
+    slow and occasionally broken, while the models are the multi-GB part that must
+    survive a VM reset on a slow connection — so each lands where it belongs.
+    """
+    from pathlib import Path
+
+    root = Path(work_dir) / "sct"
+    models = (Path(cache_dir) / "weights" / "sct_models") if cache_dir \
+        else (root / "data" / "deepseg_models")
+    return {"root": root, "bin": root / "bin", "models": models,
+            "models_link": root / "data" / "deepseg_models"}
+
+
+def sct_binary(name: str, work_dir=None, cache_dir=None) -> str | None:
+    """Locate an SCT command, in our install prefix first and then on PATH."""
+    if work_dir is not None:
+        candidate = sct_paths(work_dir, cache_dir)["bin"] / name
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which(name)
+
 
 def required_modules(segmentation: bool = True) -> tuple[str, ...]:
     return CORE_MODULES + (SEGMENTATION_MODULES if segmentation else ())
@@ -332,8 +380,9 @@ def _gpu_line() -> str:
         return f"unknown ({str(exc)[:60]})"
 
 
-def _run(cmd: list[str], log) -> bool:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+def _run(cmd: list[str], log, cwd=None) -> bool:
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          cwd=None if cwd is None else str(cwd))
     if proc.returncode != 0:
         log(f"   ! failed: {' '.join(cmd)[:120]}")
         for line in (proc.stderr or proc.stdout or "").strip().splitlines()[-12:]:
@@ -489,6 +538,88 @@ def install(*, segmentation: bool = True, force: bool = False, apt: bool = True,
     elif state["ready"]:
         log("\nready — the pipeline can run")
     return state
+
+
+def install_sct(work_dir, cache_dir=None, *, force: bool = False, log=print) -> dict:
+    """Install Spinal Cord Toolbox and its models. Returns what is usable afterwards.
+
+    Kept out of `install()` on purpose: SCT is a ~3 GB shell install that most runs
+    do not need, and a failure here must not stop the segmentation stack from being
+    set up. Every failure path returns a reason rather than raising — the stages
+    that use SCT skip with that reason.
+    """
+    from pathlib import Path
+
+    paths = sct_paths(work_dir, cache_dir)
+    existing = sct_binary("sct_deepseg", work_dir, cache_dir)
+    if existing and not force:
+        log(f"SCT already installed: {existing}")
+        return _sct_state(work_dir, cache_dir, paths)
+
+    if not shutil.which("git"):
+        return {"installed": False, "reason": "git is not available"}
+
+    root = paths["root"]
+    if not (root / ".git").exists():
+        log(f"cloning SCT {SCT_VERSION} (shallow)")
+        root.parent.mkdir(parents=True, exist_ok=True)
+        if not _run(["git", "clone", "--depth", "1", "--branch", SCT_VERSION,
+                     SCT_REPO, str(root)], log):
+            return {"installed": False, "reason": f"git clone of SCT {SCT_VERSION} failed"}
+
+    # Point the model directory at the cache *before* installing, so the ~1 GB canal
+    # model is downloaded straight into Drive instead of into the VM's disk.
+    link = paths["models_link"]
+    paths["models"].mkdir(parents=True, exist_ok=True)
+    if paths["models"] != link and not link.is_symlink():
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.exists():
+            shutil.rmtree(link, ignore_errors=True)
+        try:
+            link.symlink_to(paths["models"], target_is_directory=True)
+        except OSError as exc:  # noqa: BLE001 — Windows without developer mode
+            log(f"   ! could not link the model directory into the cache: {exc}")
+
+    log("installing SCT (non-interactive, several minutes)")
+    if not _run(["bash", "install_sct", "-iy"], log, cwd=root) and not (root / "bin").exists():
+        # install_sct is invoked through bash rather than executed directly because a
+        # fresh clone on a FUSE mount does not always keep the executable bit.
+        return {"installed": False, "reason": "install_sct failed — see the log above"}
+
+    for model in SCT_MODELS:
+        log(f"   model: {model}")
+        _install_sct_model(model, work_dir, cache_dir, log)
+    return _sct_state(work_dir, cache_dir, paths)
+
+
+def _install_sct_model(model: str, work_dir, cache_dir, log) -> bool:
+    """Fetch one deepseg model, tolerating both CLI spellings.
+
+    SCT moved from `sct_deepseg -install-task <name>` to `sct_deepseg <name>
+    -install` across 6.x/7.x. Trying both and reporting which worked is cheaper than
+    pinning our guess to a version we are not the ones releasing.
+    """
+    binary = sct_binary("sct_deepseg", work_dir, cache_dir)
+    if binary is None:
+        return False
+    for argv in ([binary, model, "-install"], [binary, "-install-task", model]):
+        if _run(argv, log):
+            return True
+    log(f"   ! model {model} did not install")
+    return False
+
+
+def _sct_state(work_dir, cache_dir, paths) -> dict:
+    binaries = {name: sct_binary(name, work_dir, cache_dir) for name in SCT_BINARIES}
+    return {
+        "installed": binaries["sct_deepseg"] is not None,
+        "version": SCT_VERSION,
+        "root": str(paths["root"]),
+        "models_dir": str(paths["models"]),
+        "binaries": binaries,
+        "missing_binaries": [n for n, p in binaries.items() if p is None],
+        "reason": None if binaries["sct_deepseg"] else "sct_deepseg not found after install",
+    }
 
 
 def _warn_about_torch(state: dict, log) -> None:

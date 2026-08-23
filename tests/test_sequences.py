@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from spinelab.sequences import (
     CONTRAST_T1,
     CONTRAST_T2,
@@ -12,6 +14,7 @@ from spinelab.sequences import (
     build_picks,
     classify_contrast,
     describe_series,
+    group_stations,
     has_fat_saturation,
     is_localizer,
     pick,
@@ -117,6 +120,56 @@ class TestLocalizer:
                             n_slices=40) is False
 
 
+class TestLocalizerWithoutADescription:
+    """The 2026-08-21 Siemens study: the exporter stripped every SeriesDescription.
+
+    Nothing textual is left, so a positioning scan has to be recognised from its
+    timing alone. Values below are the real ones from that study.
+    """
+
+    SCOUT = {"SeriesDescription": "", "ProtocolName": "",
+             "EchoTime": 2.38, "RepetitionTime": 4.2, "SliceThickness": 1.7}
+
+    def test_a_fast_gradient_echo_survey_is_a_localizer(self):
+        # 112 slices at 1.7 mm passes every geometric rule there was, and with
+        # sidecar timings (seconds) it classifies as T1 — i.e. it would have been
+        # picked as the T1 sagittal volume, beating the real 14-slice T1 TSE.
+        assert is_localizer(self.SCOUT, n_slices=112) is True
+
+    def test_the_same_rule_in_sidecar_units(self):
+        # dcm2niix writes seconds; DICOM headers carry milliseconds. Both forms of
+        # the same scan must be rejected.
+        scout_seconds = {"EchoTime": 0.00238, "RepetitionTime": 0.0042,
+                         "SliceThickness": 1.7}
+        assert is_localizer(scout_seconds, n_slices=112) is True
+
+    def test_a_single_slice_projection_slab_is_a_localizer(self):
+        # Series 20 and 25: one 52 mm slab, the MIP of the 3D SPACE acquisition.
+        assert is_localizer({"EchoTime": 437, "RepetitionTime": 3000,
+                             "SliceThickness": 52.0}, n_slices=1) is True
+
+    @pytest.mark.parametrize("meta,n", [
+        ({"EchoTime": 96, "RepetitionTime": 2540, "SliceThickness": 3.0}, 14),    # T2 TSE sag
+        ({"EchoTime": 9.5, "RepetitionTime": 703, "SliceThickness": 3.0}, 14),    # T1 TSE sag
+        ({"EchoTime": 437, "RepetitionTime": 3000, "SliceThickness": 1.3}, 40),   # 3D SPACE FS
+        ({"EchoTime": 84, "RepetitionTime": 6050, "SliceThickness": 3.0}, 35),    # axial T2
+    ])
+    def test_the_diagnostic_series_of_that_study_survive(self, meta, n):
+        assert is_localizer(meta, n_slices=n) is False
+
+    def test_a_composed_image_with_no_timing_at_all_is_not_an_analysis_input(self):
+        # Series 9 and 11: the stitched whole-body positioning image. No
+        # ImageOrientationPatient, no TE/TR — a derived picture, not an acquisition.
+        assert is_localizer({"SeriesDescription": ""}, n_slices=109) is True
+
+    def test_a_fat_suppressed_gradient_echo_is_not_rejected(self):
+        # A Dixon/VIBE volume has scout-like timing but is a diagnostic sequence,
+        # and SPINEPS has a model for it. Fat-suppression evidence protects it.
+        assert is_localizer({"EchoTime": 2.4, "RepetitionTime": 6.0,
+                             "ScanOptions": "FS", "SliceThickness": 1.5},
+                            n_slices=64) is False
+
+
 def _series(**kw) -> Series:
     base = dict(path=kw.get("name", "x") + ".nii.gz", name=kw.get("name", "x"),
                 contrast=CONTRAST_T2, plane=PLANE_SAGITTAL, n_slices=15,
@@ -173,3 +226,104 @@ class TestPicking:
         picks = build_picks([_series(name="t2sag"),
                              _series(name="ax", plane=PLANE_AXIAL, n_slices=66)])
         assert not any("separate volumes" in x for x in picks["limitations"])
+
+
+class TestStations:
+    """A study can cover two levels of the spine in one session.
+
+    The 2026-08-21 study does: an upper block (T2/T1 sagittal + a fat-suppressed
+    3D block + an axial) and a lower one. Every pick here is a single volume per
+    role, so without grouping the pipeline analyses whichever block happens to
+    have one more slice and says nothing about the other.
+    """
+
+    def _upper(self):
+        return [
+            _series(name="t2_up", z_range_mm=(-260.0, -40.0)),
+            _series(name="t1_up", contrast=CONTRAST_T1, z_range_mm=(-260.0, -40.0)),
+            _series(name="ax_up", plane=PLANE_AXIAL, n_slices=35,
+                    z_range_mm=(-300.0, -170.0)),
+        ]
+
+    def _lower(self):
+        return [
+            _series(name="t2_low", n_slices=18, z_range_mm=(-640.0, -420.0)),
+            _series(name="ax_low", plane=PLANE_AXIAL, n_slices=27,
+                    z_range_mm=(-776.0, -588.0)),
+        ]
+
+    def test_overlapping_volumes_form_one_station(self):
+        stations = group_stations(self._upper())
+        assert len(stations) == 1
+        assert {s.name for s in stations[0].series} == {"t2_up", "t1_up", "ax_up"}
+
+    def test_two_blocks_are_two_stations_numbered_from_the_top(self):
+        stations = group_stations(self._upper() + self._lower())
+        assert [st.id for st in stations] == [1, 2]
+        assert {s.name for s in stations[0].series} == {"t2_up", "t1_up", "ax_up"}
+        assert {s.name for s in stations[1].series} == {"t2_low", "ax_low"}
+        assert stations[0].z_range_mm[1] > stations[1].z_range_mm[1]
+
+    def test_a_localizer_never_joins_a_diagnostic_station(self):
+        # A whole-spine positioning scan overlaps every diagnostic block; letting it
+        # in would make one station out of the whole study and put a scout in the
+        # candidate list for the analysis volumes.
+        scout = _series(name="scout", localizer=True, z_range_mm=(-900.0, 0.0))
+        stations = group_stations(self._upper() + [scout])
+        diagnostic = [st for st in stations if not st.survey_only]
+        assert len(diagnostic) == 1
+        assert "scout" not in {s.name for s in diagnostic[0].series}
+
+    def test_survey_blocks_can_be_left_out_entirely(self):
+        scout = _series(name="scout", localizer=True, z_range_mm=(-900.0, 0.0))
+        stations = group_stations(self._upper() + [scout], include_survey=False)
+        assert len(stations) == 1
+
+    def test_a_volume_without_geometry_is_reported_not_dropped(self):
+        stations = group_stations(self._upper() + [_series(name="no_geom")])
+        assert len(stations) == 1
+        assert "no_geom" in stations[0].unplaced
+
+    def test_picks_can_be_restricted_to_one_station(self):
+        series = self._upper() + self._lower()
+        # Unrestricted, the larger lower block wins the sagittal T2 role.
+        assert build_picks(series)["T2_SAG"] == "t2_low.nii.gz"
+        picks = build_picks(series, station=group_stations(series)[0])
+        assert picks["T2_SAG"] == "t2_up.nii.gz"
+        assert picks["T2_AX"] == "ax_up.nii.gz"
+        assert picks["station"] == 1
+
+    def test_a_survey_block_becomes_its_own_station_after_the_diagnostic_ones(self):
+        # The 2026-08-21 study images the thoracic spine only on the AutoAlign
+        # survey. Grouped together with the diagnostic volumes it would vanish:
+        # a whole-spine positioning scan overlaps everything.
+        scouts = [_series(name="scout_thoracic", localizer=True, n_slices=112,
+                          z_range_mm=(-618.0, -220.0))]
+        stations = group_stations(self._upper() + self._lower() + scouts)
+        assert [(st.id, st.survey_only) for st in stations] == [(1, False), (2, False), (3, True)]
+        assert stations[2].label.endswith("(survey only)")
+
+    def test_a_survey_station_is_not_chosen_by_contrast_and_says_what_it_is(self):
+        series = self._upper() + [_series(name="scout", localizer=True, n_slices=112,
+                                          contrast=CONTRAST_T1, z_range_mm=(-618.0, -220.0))]
+        stations = group_stations(series)
+        picks = build_picks(series, station=stations[-1], stations=stations)
+        assert picks["survey_only"] is True
+        assert picks["T2_SAG"] == "scout.nii.gz"   # a localiser, chosen deliberately
+        assert picks["FATSAT_BEST"] is None
+        assert any("POSITIONING SCANS" in x for x in picks["limitations"])
+
+    def test_the_gap_between_diagnostic_blocks_is_measured(self):
+        series = self._upper() + self._lower()
+        stations = group_stations(series)
+        picks = build_picks(series, station=stations[0], stations=stations)
+        gap = [x for x in picks["limitations"] if "no diagnostic series covers" in x]
+        assert gap, picks["limitations"]
+        assert "120 mm of spine" in gap[0]   # -420 (lower top) to -300 (upper bottom)
+
+    def test_the_unanalysed_station_is_named_as_a_limitation(self):
+        series = self._upper() + self._lower()
+        picks = build_picks(series, station=group_stations(series)[0])
+        note = [x for x in picks["limitations"] if "station" in x.lower()]
+        assert note, picks["limitations"]
+        assert "--station 2" in note[0]

@@ -20,6 +20,7 @@ DEFAULT_STAGES = (
     "spineps",        # vertebra instances + semantic subregions (posterior elements)
     "totalspineseg",  # cord, canal, discs
     "totalsegmentator",  # paraspinal muscles, ribs
+    "seg_sct",        # Spinal Cord Toolbox cord + canal — the masks the cut-offs assume
     "register",       # masks -> fat-suppressed and axial series (rigid motion correction)
     "fatsat_qc",      # did the fat suppression actually work? gates the oedema branch
     "crosscheck",     # independent vertebra model, per-level reliability (quality profile)
@@ -29,6 +30,7 @@ DEFAULT_STAGES = (
     "marrow",         # robust intensity outlier screen inside vertebral bodies
     "posterior",      # facet + costovertebral side comparison (label-based)
     "canal",          # canal cross-sectional area profile
+    "compression",    # cervical canal against published cut-offs (the only calibrated numbers)
     "discs",          # per-level disc signal ranking
     "radiomics",      # first-order + GLCM texture per vertebra
     "agreement",      # cross-tool sanity check (cord Dice)
@@ -46,6 +48,14 @@ class Config:
     Drive (e.g. /content/drive/MyDrive/mri/study.zip) — never a public repo."""
 
     subject_id: str = "anon"
+
+    station: int = 0
+    """Which craniocaudal block of the study to analyse; 0 = choose automatically.
+
+    A session can image two levels of the spine (the 2026-08-21 study images two),
+    and every sequence pick is one volume per role. Runs are therefore per station,
+    and each writes to its own results directory so the second does not overwrite
+    the first."""
 
     # --- workspace --------------------------------------------------------
     work_dir: Path = Path("/content/spine_work")
@@ -72,6 +82,9 @@ class Config:
     timeout_spineps_s: int = 2400
     timeout_tss_s: int = 2400
     timeout_ts_s: int = 2400
+    timeout_sct_s: int = 1800
+    """Spinal Cord Toolbox. Lower than the others on purpose: its models are small
+    and a run that takes half an hour has gone wrong rather than gone slowly."""
 
     quality: bool = False
     """Spend GPU time on reliability rather than speed: enables the independent
@@ -86,22 +99,52 @@ class Config:
     facet question depends on. Requires `quality`."""
 
     # --- analysis parameters (all explicit, none buried in a cell) --------
+    #
+    # Every constant below states where it comes from. "OURS" means exactly that:
+    # chosen here, with no literature behind it. That distinction is the difference
+    # between a measurement and a house rule, and a reader of the report cannot make
+    # it unless the code does. See docs/research/reading-list-2026-08.md §4 for the
+    # catalogue, including which published scales were derived on the lumbar spine
+    # and therefore may not be carried over to the thoracic one.
     marrow_robust_z: float = 3.5
-    """Modified z-score threshold (0.6745*(x-median)/MAD) for a bright voxel."""
+    """Modified z-score threshold (0.6745*(x-median)/MAD) for a bright voxel.
+
+    OURS. A conventional robust-outlier cut-off, not a radiological criterion. It
+    ranks levels within one study; it does not define oedema."""
     marrow_min_outlier_voxels: int = 5
+    """OURS. Below this a "cluster" is single-voxel noise."""
     posterior_reference_k: float = 3.0
     """Bright-signal threshold for the facet/costal regions, expressed as
-    median + k*sigma_MAD of a reference tissue (vertebral marrow)."""
+    median + k*sigma_MAD of a reference tissue (vertebral marrow).
+
+    OURS. No published scale exists for thoracic facet or costovertebral joints on
+    MRI — the ESSR-Arthritis consensus (Eur Radiol 2025) supplies *definitions* for
+    reporting them, not a grading scale. So this number sorts regions by brightness
+    and can never be phrased as a finding."""
     posterior_bright_percentile: float = 95.0
     """Fallback only, used when no reference tissue is available. Never a
-    whole-volume percentile: that highlights CSF and subcutaneous fat."""
+    whole-volume percentile: that highlights CSF and subcutaneous fat. OURS."""
     facet_dilate_voxels: int = 2
     """How far each articular process is grown before intersecting the two to form
-    the joint-interface ROI. 2 voxels on a 0.49 mm axial grid is about 1 mm."""
+    the joint-interface ROI. 2 voxels on a 0.49 mm axial grid is about 1 mm. OURS."""
     muscle_asymmetry_pct_threshold: float = 10.0
+    """OURS. A reporting threshold for left-right paraspinal difference, not a
+    clinical one: asymmetry of this size is common in asymptomatic people, more so
+    in a former athlete."""
     wedge_scheuermann_deg: float = 5.0
     wedge_scheuermann_run: int = 3
+    """Scheuermann's rule as classically stated — anterior wedging of at least 5° at
+    three or more adjacent thoracic levels. The rule is standard; the primary source
+    has not been checked against in this repository, so it is cited as convention
+    rather than as a verified reference."""
     canal_stenosis_pct: float = 33.0
+    """Relative narrowing against the study's own median canal area.
+
+    OURS, and deliberately relative: clinical stenosis is defined on absolute area
+    together with cord signal and symptoms, and no absolute threshold can be applied
+    to one study with no normative cohort. The one calibrated exception in this
+    project is the cervical canal, where `stages/compression.py` uses published
+    cut-offs from external cohorts."""
     min_series_slices: int = 5
     """Series with fewer slices are localisers/scouts and never analysis inputs."""
 
@@ -122,6 +165,8 @@ class Config:
 
     @property
     def results_dir(self) -> Path:
+        if self.station:
+            return self.work_dir / "results" / f"station-{self.station}"
         return self.work_dir / "results"
 
     @property
