@@ -221,9 +221,21 @@ def read_events(results_dir: str | Path) -> list[dict]:
     return events
 
 
-def digest(work_dir: str | Path, *, log_tail: int = 40) -> str:
+def results_path(work_dir: str | Path, station: int = 0) -> Path:
+    """Where a run's results live. Mirrors Config.results_dir.
+
+    Kept here as well because `diagnose` has no Config to ask: a study covering two
+    craniocaudal stations is analysed one at a time, and pointing the diagnostics at
+    `results/` after a `--station 2` run reports on the previous station instead of
+    saying that this one has no results.
+    """
+    base = Path(work_dir) / "results"
+    return base / f"station-{int(station)}" if station else base
+
+
+def digest(work_dir: str | Path, *, log_tail: int = 40, station: int = 0) -> str:
     """Paste-sized account of a run: environment, stages, problems, tail of the log."""
-    results = Path(work_dir) / "results"
+    results = results_path(work_dir, station)
     lines: list[str] = []
 
     summary = _read_json(results / "summary.json")

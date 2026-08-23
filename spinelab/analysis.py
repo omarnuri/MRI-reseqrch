@@ -523,6 +523,30 @@ COMPRESSION_P_LOW = 0.345
 COMPRESSION_P_HIGH = 0.451
 
 
+def sct_level_index(level_name) -> int | None:
+    """'T7' -> 14, counting C1=1. None for anything unrecognised, never a guess.
+
+    The one place a level name becomes a number, so that a reference cohort in one
+    label space and this study in another are compared level for level rather than
+    label for label.
+    """
+    if not level_name:
+        return None
+    return _SCT_VERTEBRA_INDEX.get(str(level_name).strip().upper())
+
+
+def sct_level_name(index) -> str | None:
+    """14 -> 'T7'. The inverse of sct_level_index, for reporting."""
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        return None
+    for name, value in _SCT_VERTEBRA_INDEX.items():
+        if value == index and name != "S1":
+            return name
+    return None
+
+
 def sct_disc_value(level_name) -> int | None:
     """SCT label value for a disc named like "C3-C4", or None if unrecognised.
 
@@ -598,3 +622,233 @@ def dice(a: np.ndarray, b: np.ndarray) -> float:
     if denom == 0:
         return 0.0
     return float(2.0 * int((a & b).sum()) / denom)
+
+
+# --------------------------------------------------------------------------
+# Level morphometry — measured identically on any whole-vertebra label volume
+# --------------------------------------------------------------------------
+#
+# These exist so that a reference cohort and this subject can be measured by the
+# *same* code from the *same* kind of mask. `stages/geometry.py` measures heights
+# and wedge angles on the vertebral **body** (the corpus subregion SPINEPS
+# produces), and that is the right way to measure them — but a whole-spine label
+# volume has one label per vertebra, posterior elements included, so a wedge angle
+# from it lands partly on the spinous process. Comparing the two would be a
+# silent mismatch of definitions. Nothing here needs a corpus label, and nothing
+# here is a height or a wedge angle.
+
+
+def label_table(volume: np.ndarray) -> dict[int, np.ndarray]:
+    """Voxel coordinates of every non-zero label, as {label: (n, 3) array}.
+
+    One pass over the volume, then all per-label work happens on the coordinate
+    lists. The obvious alternative — `np.argwhere(volume == label)` in a loop —
+    rescans the whole array once per label, which on a whole-spine volume with
+    forty labels is forty passes over eight million voxels and took a hundred
+    seconds per subject where this takes about one.
+    """
+    mask = volume != 0
+    if not mask.any():
+        return {}
+    coords = np.argwhere(mask)
+    values = volume[mask]
+    order = np.argsort(values, kind="stable")
+    values, coords = values[order], coords[order]
+    labels, starts = np.unique(values, return_index=True)
+    ends = list(starts[1:]) + [len(values)]
+    return {int(label): coords[start:end]
+            for label, start, end in zip(labels, starts, ends)}
+
+
+def centroids_si(volume: np.ndarray) -> dict[int, float]:
+    """Mean superior-inferior index of every non-zero label."""
+    return {label: float(coords[:, SI_AXIS].mean())
+            for label, coords in label_table(volume).items()}
+
+
+def slice_counts(mask: np.ndarray) -> np.ndarray:
+    """Voxels per superior-inferior slice. Computed once, sliced many times."""
+    mask = mask.astype(bool)
+    axes = tuple(axis for axis in range(mask.ndim) if axis != SI_AXIS)
+    return mask.sum(axis=axes)
+
+
+#: How close a label's centroid has to be to a disc anchor, as a fraction of the
+#: local disc-to-disc spacing, before that label *is* that disc. Well inside the
+#: gap: a matching disc lands within a millimetre or two, the nearest vertebra
+#: roughly half a spacing away.
+DISC_ANCHOR_TOLERANCE = 0.3
+
+
+def levels_from_disc_anchors(label_si: dict[int, float], anchors: dict[int, float],
+                             tolerance: float = DISC_ANCHOR_TOLERANCE,
+                             ) -> tuple[dict[int, int], dict[int, int], str]:
+    """Give every label in a whole-spine volume its anatomical level.
+
+    `anchors` are disc positions already carrying the level numbering this project
+    uses everywhere (a disc is named by the vertebra below it, C1=1 … T1=8 …
+    L1=20) — in the reference cohort they are the manually placed disc points.
+    Returns `(vertebra_map, disc_map, note)`, both mapping label value to level.
+
+    Done this way, rather than by reading the label values, because the numbering
+    inside a whole-spine label volume is dataset-specific and documented nowhere.
+    An offset table copied from one dataset to another shifts every level by a
+    constant, and every number downstream still looks perfectly reasonable.
+
+    Sizes are not used either: C1 is about 5 cm3 and an L4/L5 disc about 12 cm3,
+    so "vertebrae are the big ones" misfiles the entire cervical spine.
+    """
+    if len(anchors) < 2 or not label_si:
+        return {}, {}, "fewer than two disc anchors, or no labels"
+    keys = sorted(anchors)
+    z = [anchors[k] for k in keys]
+    if any(z[i] <= z[i + 1] for i in range(len(z) - 1)):
+        return {}, {}, "disc anchors are not ordered head to foot"
+    spacing = float(np.median([z[i] - z[i + 1] for i in range(len(z) - 1)]))
+    if spacing <= 0:
+        return {}, {}, "disc anchors have no spacing"
+
+    # A label sitting on an anchor is that disc. Resolved before anything else,
+    # because a disc's centroid lies exactly on the boundary between the two
+    # vertebrae either side of it and would otherwise be counted as one of them.
+    disc_map: dict[int, int] = {}
+    for k in keys:
+        nearest, distance = None, None
+        for label, zz in label_si.items():
+            d = abs(zz - anchors[k])
+            if distance is None or d < distance:
+                nearest, distance = label, d
+        if nearest is not None and distance <= tolerance * spacing:
+            disc_map[nearest] = k
+
+    vertebra_map: dict[int, int] = {}
+    for k, k_next in zip(keys, keys[1:]):
+        if k_next != k + 1:
+            continue                       # a gap in the anchors, not a level
+        inside = [label for label, zz in label_si.items()
+                  if anchors[k_next] < zz < anchors[k] and label not in disc_map]
+        if len(inside) == 1 and 1 <= k <= 25:
+            vertebra_map[inside[0]] = k
+    if not vertebra_map:
+        return {}, {}, ("no level has exactly one label between two consecutive disc "
+                        "anchors")
+    return vertebra_map, disc_map, (
+        f"{len(vertebra_map)} vertebrae and {len(disc_map)} discs placed from "
+        f"{len(anchors)} disc anchors, spacing {spacing:.1f} voxels")
+
+
+def mean_thickness_mm(coords: np.ndarray, si_mm: float, ap_size: int) -> float | None:
+    """Volume divided by axial footprint — a disc's mean height, in millimetres.
+
+    Robust where a single mid-sagittal profile is not: a disc is wedge-shaped and
+    its height depends on where the profile is taken, whereas volume/footprint
+    uses every voxel and needs no plane to be chosen.
+
+    Takes a coordinate list from `label_table` rather than a mask, so that a level
+    is never re-extracted from the full volume.
+    """
+    coords = np.asarray(coords)
+    if coords.size == 0:
+        return None
+    # One integer key per (left-right, anterior-posterior) column. The multiplier
+    # has to be the size of the *second* axis, or two different columns collide and
+    # the footprint comes out too small — which inflates the thickness.
+    columns = coords[:, LR_AXIS].astype(np.int64) * int(ap_size) + coords[:, AP_AXIS]
+    footprint = int(np.unique(columns).size)
+    if footprint == 0:
+        return None
+    return float(len(coords)) / float(footprint) * float(si_mm)
+
+
+def slab_area_mm2(counts: np.ndarray, z_low: int, z_high: int,
+                  voxel_area_mm2: float) -> float | None:
+    """Median cross-sectional area over an inclusive slice range of `slice_counts`."""
+    counts = np.asarray(counts, dtype=float)
+    z_low, z_high = int(max(z_low, 0)), int(min(z_high, counts.size - 1))
+    if z_high < z_low:
+        return None
+    areas = counts[z_low:z_high + 1]
+    areas = areas[areas > 0]
+    if areas.size == 0:
+        return None
+    return round(float(np.median(areas)) * float(voxel_area_mm2), 3)
+
+
+def segmental_angles_deg(centroids: dict[int, np.ndarray]) -> dict[int, float]:
+    """Angle at each vertebra between the segment above it and the segment below.
+
+    Keyed by the middle vertebra's label. Zero means the three centroids are
+    collinear; the sign says which way the chain bends, positive for an apex
+    pointing posteriorly (the sense of a kyphosis) and negative for one pointing
+    anteriorly (a lordosis). Reported as a deviation from straight rather than as
+    the 175-degree included angle, so that "more curved" reads as a bigger number.
+
+    Measured in the sagittal (AP/SI) plane on centroids of whole vertebrae, so it
+    is comparable between any two label volumes of the same kind — and it is not a
+    Cobb angle, which is measured between endplate tangents on a standing
+    radiograph, in a standing patient.
+    """
+    order = sorted(centroids, key=lambda label: -float(centroids[label][SI_AXIS]))
+    out: dict[int, float] = {}
+    for above, middle, below in zip(order, order[1:], order[2:]):
+        top, mid, bot = (np.asarray(centroids[k], dtype=float) for k in (above, middle, below))
+        upper = np.array([top[AP_AXIS] - mid[AP_AXIS], top[SI_AXIS] - mid[SI_AXIS]])
+        lower = np.array([mid[AP_AXIS] - bot[AP_AXIS], mid[SI_AXIS] - bot[SI_AXIS]])
+        # Cross product of (anterior, superior) vectors: negative when the middle
+        # vertebra lies posterior to the chord between its neighbours.
+        cross = float(lower[0] * upper[1] - lower[1] * upper[0])
+        out[middle] = round(angle_deg(upper, lower) * (-1.0 if cross > 0 else 1.0), 3)
+    return out
+
+
+# --------------------------------------------------------------------------
+# Reference distributions
+# --------------------------------------------------------------------------
+
+#: Below this many subjects a level's distribution is not summarised at all.
+#: Percentiles of a handful of values are noise dressed as a reference, and the
+#: whole point of a reference cohort is that it is not that.
+MIN_REFERENCE_N = 10
+
+
+def summarise_distribution(values, min_n: int = MIN_REFERENCE_N) -> dict | None:
+    """Median, IQR and 5th/95th percentiles of a reference sample.
+
+    Non-finite entries are dropped rather than propagated: a cohort volume where
+    one level could not be measured must reduce n for that level and nothing else.
+    Returns None when too few subjects remain — the caller reports the absence,
+    which is why this never falls back to a smaller summary.
+    """
+    array = np.asarray([v for v in np.ravel(np.asarray(values, dtype=float))
+                        if np.isfinite(v)], dtype=float)
+    if array.size < max(int(min_n), 1):
+        return None
+    q5, q25, q50, q75, q95 = (float(x) for x in np.percentile(array, [5, 25, 50, 75, 95]))
+    return {
+        "n": int(array.size),
+        "median": round(q50, 3),
+        "iqr": [round(q25, 3), round(q75, 3)],
+        "p5_p95": [round(q5, 3), round(q95, 3)],
+        "min": round(float(array.min()), 3),
+        "max": round(float(array.max()), 3),
+    }
+
+
+def percentile_of(value, distribution) -> float | None:
+    """Where `value` falls inside a reference sample, as a percentage.
+
+    Midrank convention: ties count as half, so a value equal to every member of a
+    uniform sample lands at 50 and not at 0 or 100. Deliberately returns a
+    *position*, never a verdict — no cut-off is applied here or by any caller,
+    because this distribution is computed by this project rather than published
+    with one (see docs/research/README.md).
+    """
+    if value is None or not np.isfinite(float(value)):
+        return None
+    sample = np.asarray([v for v in np.ravel(np.asarray(distribution, dtype=float))
+                         if np.isfinite(v)], dtype=float)
+    if sample.size == 0:
+        return None
+    below = float((sample < float(value)).sum())
+    equal = float((sample == float(value)).sum())
+    return round(100.0 * (below + 0.5 * equal) / sample.size, 1)

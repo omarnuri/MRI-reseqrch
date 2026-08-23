@@ -31,6 +31,7 @@ DEFAULT_STAGES = (
     "posterior",      # facet + costovertebral side comparison (label-based)
     "canal",          # canal cross-sectional area profile
     "compression",    # cervical canal against published cut-offs (the only calibrated numbers)
+    "normative",      # per-level position in an open whole-spine cohort (ds005616)
     "discs",          # per-level disc signal ranking
     "radiomics",      # first-order + GLCM texture per vertebra
     "agreement",      # cross-tool sanity check (cord Dice)

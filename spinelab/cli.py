@@ -79,6 +79,17 @@ def build_parser() -> argparse.ArgumentParser:
     setup_p.add_argument("--cache", default=None,
                         help="persistent cache; with --sct the models are kept here")
 
+    norm_p = sub.add_parser(
+        "normative",
+        help="build the open-cohort reference the `normative` stage compares against")
+    norm_p.add_argument("--cache", required=True,
+                        help="persistent cache; the reference is built and kept here")
+    norm_p.add_argument("--rebuild", action="store_true",
+                        help="recompute even if the reference JSON already exists "
+                             "(the downloaded masks are reused either way)")
+    norm_p.add_argument("--subjects", default=None,
+                        help="comma-separated subject ids, for a quick partial build")
+
     deid_p = sub.add_parser("deid", help="write a de-identified copy of a DICOM study")
     deid_p.add_argument("--dicom", required=True)
     deid_p.add_argument("--out", required=True)
@@ -93,14 +104,20 @@ def build_parser() -> argparse.ArgumentParser:
                        help="how many trailing log lines to include (0 for none)")
     diag_p.add_argument("--numbers", action="store_true",
                        help="also print the key measurements from findings.json")
+    diag_p.add_argument("--station", type=int, default=0,
+                       help="which craniocaudal station's results to report on "
+                            "(the run's own --station; 0 for a single-station study)")
 
     sub.add_parser("stages", help="list pipeline stages in order")
     return parser
 
 
-def _key_numbers(work: Path) -> str:
+def _key_numbers(work: Path, station: int = 0) -> str:
     """The measurements worth comparing between runs, flattened for pasting."""
-    findings = json.loads((Path(work) / "results" / "findings.json").read_text(encoding="utf-8"))
+    from .runlog import results_path
+
+    findings = json.loads(
+        (results_path(work, station) / "findings.json").read_text(encoding="utf-8"))
     data = {k: (v.get("data") or {}) for k, v in findings.get("stages", {}).items()}
     lines = ["", "=== key numbers ==="]
 
@@ -226,6 +243,29 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"   ! SCT commands not found: {', '.join(sct['missing_binaries'])}")
         return 0 if state["ready"] else 1
 
+    if args.command == "normative":
+        from . import normative
+
+        existing = None if args.rebuild else normative.load(args.cache)
+        if existing is not None:
+            payload = existing
+            print(f"already built: {normative.cohort_json(args.cache)}")
+        else:
+            subjects = ([s.strip() for s in args.subjects.split(",") if s.strip()]
+                        if args.subjects else None)
+            payload = normative.build(args.cache, subjects=subjects)
+        cohort = payload["cohort"]
+        print(f"cohort  : {cohort['dataset']} — {cohort['sequence']}, {cohort['license']}")
+        print(f"subjects: {cohort['subjects_measured']} measured, "
+              f"{cohort['subjects_skipped']} skipped")
+        print(f"levels  : {len(payload['levels'])} "
+              f"({', '.join(sorted(payload['levels'])[:6])}…)")
+        print(f"file    : {normative.cohort_json(args.cache)}")
+        if not payload["levels"]:
+            print("! no level has enough subjects — the stage will refuse")
+            return 1
+        return 0
+
     if args.command == "find":
         from .discover import discover
 
@@ -239,10 +279,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "diagnose":
         from .runlog import digest
 
-        print(digest(args.work, log_tail=args.log_tail))
+        print(digest(args.work, log_tail=args.log_tail, station=args.station))
         if args.numbers:
             try:
-                print(_key_numbers(Path(args.work)))
+                print(_key_numbers(Path(args.work), args.station))
             except Exception as exc:  # noqa: BLE001
                 print(f"\n(no findings.json to read: {exc})")
         return 0

@@ -144,6 +144,11 @@ def run(ctx: Context) -> StageResult:
         "MRI. The ESSR-Arthritis consensus (Eur Radiol 2025) defines how to describe them, "
         "not how to grade them, so the threshold here is this project's own and sorts "
         "regions by brightness — it is not a severity score.",
+        "Facet changes are common in people with no pain: in a population sample "
+        "(Kalichman 2008, Framingham, CT, lumbar) facet osteoarthritis was found in 59.6% "
+        "of men and 66.7% of women, and that study reports no association between it and "
+        "low back pain. A difference measured here is a difference in the image, and does "
+        "not by itself explain a symptom.",
     ]
     if suppression_ok is False:
         limits.insert(0,

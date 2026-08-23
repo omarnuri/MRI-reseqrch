@@ -12,11 +12,14 @@ thresholds) and the reasons behind them.
 
 * `spinelab/` — the package. `analysis.py` is pure numpy and fully tested;
   `stages/*.py` are thin I/O wrappers; `pipeline.py` runs stages with resume.
-* `notebooks/colab_pipeline.ipynb` — 4-cell launcher, the entry point for users.
+* `notebooks/colab_pipeline.ipynb` — the launcher, the entry point for users.
+  `tests/test_notebook.py` guards it: cells must parse, carry no committed outputs
+  (one used to embed the patient's name), and read results from the station the run
+  actually wrote to.
 * `notebooks/legacy/` — the old 57-cell notebook. Some of its stated conclusions
   are formally retracted in its own text; do not reuse them.
 * `docs/` — bug ledger, stack review, clinical scope, privacy.
-* `tests/` — 333 tests, no GPU, no patient data, ~15 s.
+* `tests/` — 404 tests, no GPU, no patient data, ~70 s.
 
 ## Commands
 
@@ -26,6 +29,7 @@ python -m spinelab run --dicom /path/study.zip --cache ~/spinelab-cache
 python -m spinelab run --dicom /path/study.zip --station 2   # one station per run
 python -m spinelab audit --dicom /path/dicom
 python -m spinelab setup --sct --cache ~/spinelab-cache      # Spinal Cord Toolbox, ~3 GB
+python -m spinelab normative --cache ~/spinelab-cache        # reference cohort, ~21 MB of masks
 ```
 
 Two local venvs, on purpose:
@@ -52,6 +56,10 @@ so it finds code bugs but is not how a real run should be made.
 * `CALIBRATED` is the only level allowed to say which side of a threshold a value falls
   on, and only when the cohort the threshold came from travels with the number. Today
   that is the Spinal Cord Toolbox cervical measures and nothing else.
+* A percentile against the `normative` cohort is a position, not a threshold: that
+  stage is `MEASUREMENT`, and the words "normal" and "abnormal" may not appear beside
+  one. The cohort spread is computed here, not published, which is the whole
+  difference from `CALIBRATED`.
 * Missing sequence → `SkipStage` with the reason, never a substitute number.
 * Do not claim a segmentation stage works without an actual Colab GPU run.
 

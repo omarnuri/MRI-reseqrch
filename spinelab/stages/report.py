@@ -73,6 +73,7 @@ def run(ctx: Context) -> StageResult:
     sections.append(_muscle_section(ctx))
     sections.append(_canal_section(ctx))
     sections.append(_compression_section(ctx))
+    sections.append(_normative_section(ctx))
     sections.append(_disc_section(ctx))
     sections.append(_agreement_section(ctx))
     sections.append(_reliability_section(ctx))
@@ -355,6 +356,66 @@ def _compression_section(ctx: Context) -> str:
               f"«возможно» до {thresholds.get('compression_p_high')}, выше — «да». "
               f"{html.escape(str((data.get('citations') or {}).get('compression_probability', '')))}</div>"
             + (f"<ul>{extra}</ul>" if extra else "")
+            + f"<div class='warn'><b>Границы применимости:</b><ul>{limits}</ul></div>")
+
+
+def _normative_section(ctx: Context) -> str:
+    """Where this spine sits inside an open cohort, level by level.
+
+    Shown as a position and a spread, never as a verdict: the cohort is CC0 and
+    the spread was computed here, so no cut-off from it has been validated against
+    anything. The protocol mismatch goes above the table rather than under it,
+    because on a positioning scan it is the most important thing on the screen.
+    """
+    data, note = _stage(ctx, "normative")
+    head = f"{_h2('Сравнение с открытой когортой')} {badge_html(Evidence.MEASUREMENT)}"
+    if note:
+        return head + note
+
+    cohort = data.get("cohort", {})
+    titles = {"canal_area_mm2": "Канал, мм²", "cord_area_mm2": "Спинной мозг, мм²",
+              "cord_canal_ratio": "Мозг / канал", "disc_height_mm": "Диск сверху, мм",
+              "segmental_angle_deg": "Сегментарный угол, °"}
+    columns = [key for key in titles
+               if any(key in level.get("metrics", {})
+                      for level in data.get("levels", {}).values())]
+    header = "".join(f"<th>{html.escape(titles[key])}</th>" for key in columns)
+    rows = ""
+    for name, level in data.get("levels", {}).items():
+        cells = ""
+        for key in columns:
+            entry = level.get("metrics", {}).get(key)
+            if not entry:
+                cells += "<td>—</td>"
+                continue
+            percentile = entry.get("percentile")
+            spread = entry.get("cohort_p5_p95")
+            position = (f"<br><span class='mute'>перцентиль {percentile}, "
+                        f"когорта {entry.get('cohort_median')} "
+                        f"({spread[0]}–{spread[1]})</span>"
+                        if percentile is not None and spread else
+                        "<br><span class='mute'>уровня нет в когорте</span>")
+            cells += f"<td><b>{entry.get('value')}</b>{position}</td>"
+        rows += f"<tr><td>{html.escape(name)}</td>{cells}</tr>"
+
+    warning = ""
+    if data.get("protocol_match") == "survey_scan":
+        warning = (f"<div class='warn'><b>{html.escape(data.get('protocol_note', ''))}</b>"
+                   f"</div>")
+    limits = "".join(f"<li>{html.escape(x)}</li>"
+                     for x in data.get("interpretation_limits", []) if x)
+    return (head
+            + warning
+            + f"<p>Когорта: <b>{html.escape(str(cohort.get('dataset')))}</b>, "
+              f"{cohort.get('subjects_measured')} человек, "
+              f"{html.escape(str(cohort.get('sequence')))}, лицензия "
+              f"{html.escape(str(cohort.get('license')))}. Возраст "
+              f"{html.escape(str(cohort.get('age_years')))}.</p>"
+            + (f"<table><tr><th>Уровень</th>{header}</tr>{rows}</table>" if rows else
+               "<p>Ни один уровень не сравнился с когортой.</p>")
+            + "<div class='box'>Перцентиль — это <b>место в выборке</b>, а не «норма» и "
+              "не «отклонение». Порогов эта когорта не даёт: их никто не публиковал и "
+              "ни на каком исходе не проверял.</div>"
             + f"<div class='warn'><b>Границы применимости:</b><ul>{limits}</ul></div>")
 
 

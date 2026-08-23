@@ -788,6 +788,105 @@ class TestStageContract:
         assert results["report"].status.value == "ok"
 
 
+class TestNormativeStage:
+    """Position in an open cohort — the one comparison against someone else.
+
+    The evidence rule this guards is narrow and load-bearing: a percentile says
+    where a value sits, and only `Evidence.CALIBRATED` may say which side of a line
+    it falls on. This stage is MEASUREMENT, so no verdict wording may reach the
+    report through it.
+    """
+
+    #: TotalSpineSeg label space: T1..T5 bodies, the discs above them, cord and CSF.
+    VERTEBRAE = {21: "T1", 22: "T2", 23: "T3", 24: "T4", 25: "T5"}
+    DISCS = {72: "T1-T2", 73: "T2-T3", 74: "T3-T4", 75: "T4-T5"}
+
+    def _seed(self, tmp_path, *, voxel=(1.0, 1.0, 1.0), survey=False, cohort=True):
+        cfg = seed_study(tmp_path, fatsat=False)
+        cfg.cache_dir = tmp_path / "cache"
+        cfg.stages = ("normative",)
+
+        volume = np.zeros((8, 24, 90), dtype=np.int16)
+        z = 84
+        for step, label in enumerate(sorted(self.VERTEBRAE)):
+            volume[2:6, 6:18, z - 12:z] = label
+            z -= 12
+            disc = 71 + step + 1
+            if disc in self.DISCS:
+                volume[2:6, 6:18, z - 3:z] = disc
+                z -= 3
+        volume[3:5, 10:14, 6:84] = L.TSS_SPINAL_CORD
+        volume[3:5, 8:10, 6:84] = L.TSS_CSF
+        affine = np.diag([voxel[0], voxel[1], voxel[2], 1.0])
+        path = str(cfg.nifti_dir / "tss_labels.nii.gz")
+        nib.save(nib.Nifti1Image(volume, affine), path)
+        _write_stage(cfg, "totalspineseg", {"label_volume": path})
+
+        if survey:
+            ingest = json.loads((cfg.stage_dir / "ingest.json").read_text(encoding="utf-8"))
+            ingest["data"]["picks"]["survey_only"] = True
+            (cfg.stage_dir / "ingest.json").write_text(json.dumps(ingest), encoding="utf-8")
+
+        if cohort:
+            reference = {
+                "cohort": {"dataset": "ds005616", "license": "CC0",
+                           "sequence": "3D T2w SPACE, whole spine, 1 mm isotropic",
+                           "subjects_measured": 40},
+                "levels": {name: {"canal_area_mm2": {
+                    "n": 40, "median": 150.0, "p5_p95": [120.0, 190.0],
+                    "values": [120.0 + i for i in range(40)]}}
+                    for name in self.VERTEBRAE.values()},
+                "what_this_is_not": ["not a published normative reference"],
+            }
+            out = cfg.cache_dir / "normative" / "ds005616-T2w.json"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(reference), encoding="utf-8")
+        return cfg
+
+    def test_without_the_cohort_it_says_how_to_build_it(self, tmp_path):
+        cfg = self._seed(tmp_path, cohort=False)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        assert results["normative"].status.value == "skipped"
+        assert "spinelab normative --cache" in results["normative"].reason
+
+    def test_levels_are_named_and_carry_a_position_not_a_verdict(self, tmp_path):
+        cfg = self._seed(tmp_path)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        data = results["normative"].data
+        assert results["normative"].evidence.value == "measurement"
+        assert set(data["levels"]) <= set(self.VERTEBRAE.values())
+        entry = data["levels"]["T3"]["metrics"]["canal_area_mm2"]
+        assert entry["cohort_n"] == 40 and 0.0 <= entry["percentile"] <= 100.0
+        # The measurements themselves carry no verdict wording — only the
+        # interpretation limits are allowed to use those words, to deny them.
+        levels_text = json.dumps(data["levels"]).lower()
+        for word in ("normal", "abnormal", "stenosis", "exceeds", "threshold"):
+            assert word not in levels_text
+
+    def test_the_disc_of_a_level_is_the_one_above_it(self, tmp_path):
+        cfg = self._seed(tmp_path)
+        results = run_pipeline(cfg, log=lambda *_: None)
+        metrics = results["normative"].data["levels"]["T2"]["metrics"]
+        # T2 carries the T1-T2 disc, and T1 (the topmost) carries none.
+        assert "disc_height_mm" in metrics
+        assert "disc_height_mm" not in results["normative"].data["levels"]["T1"]["metrics"]
+
+    def test_a_matching_protocol_and_a_coarse_one_are_labelled_differently(self, tmp_path):
+        fine = run_pipeline(self._seed(tmp_path / "a"), log=lambda *_: None)
+        coarse = run_pipeline(self._seed(tmp_path / "b", voxel=(1.0, 1.0, 3.5)),
+                              log=lambda *_: None)
+        assert fine["normative"].data["protocol_match"] == "same_family"
+        assert coarse["normative"].data["protocol_match"] == "coarser_slices"
+        assert "3.5 mm" in coarse["normative"].data["protocol_note"]
+
+    def test_a_positioning_scan_says_so_before_any_number(self, tmp_path):
+        results = run_pipeline(self._seed(tmp_path, survey=True), log=lambda *_: None)
+        data = results["normative"].data
+        assert data["protocol_match"] == "survey_scan"
+        assert "POSITIONING SCAN" in data["protocol_note"]
+        assert data["protocol_note"] in data["interpretation_limits"]
+
+
 class TestCoverageGuard:
     def test_side_comparison_is_refused_when_one_side_is_out_of_field(self, tmp_path):
         # This is the coronal-STIR-on-a-sagittal-grid situation that produced the

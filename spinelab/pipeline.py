@@ -125,8 +125,8 @@ def _registry() -> dict[str, StageFn]:
     # optional dependency only breaks the stage that needs it.
     from .stages import (
         agreement, canal, compression, crosscheck, discs, facets_axial, fatsat_qc,
-        geometry, ingest, marrow, muscles, posterior, radiomics, register, report,
-        seg_sct, seg_spineps, seg_totalsegmentator, seg_totalspineseg,
+        geometry, ingest, marrow, muscles, normative, posterior, radiomics, register,
+        report, seg_sct, seg_spineps, seg_totalsegmentator, seg_totalspineseg,
     )
 
     return {
@@ -145,6 +145,7 @@ def _registry() -> dict[str, StageFn]:
         "posterior": posterior.run,
         "canal": canal.run,
         "compression": compression.run,
+        "normative": normative.run,
         "discs": discs.run,
         "radiomics": radiomics.run,
         "agreement": agreement.run,

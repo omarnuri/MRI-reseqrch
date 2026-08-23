@@ -23,9 +23,20 @@ from spinelab.analysis import (
     longest_run,
     midline_index,
     mirror_side_labels,
+    centroids_si,
+    label_table,
+    levels_from_disc_anchors,
+    mean_thickness_mm,
     modified_z,
+    percentile_of,
+    sct_level_index,
+    sct_level_name,
+    segmental_angles_deg,
+    slab_area_mm2,
+    slice_counts,
     robust_threshold,
     screen_region,
+    summarise_distribution,
     side_masks_from_labels,
     split_by_midline,
     wedge_angle_deg,
@@ -539,3 +550,157 @@ class TestClassifyCompression:
 
     def test_missing_probability_is_none(self):
         assert classify_compression(None) is None
+
+
+class TestLevelMorphometry:
+    """The measurements a reference cohort and this study share.
+
+    A synthetic spine: alternating vertebra and disc slabs stacked along the
+    superior-inferior axis (canonical axis 2), with label values chosen to be
+    nothing like any real convention — the point of the level mapping is that it
+    does not read them.
+    """
+
+    @staticmethod
+    def _spine(n_vertebrae: int = 5, vert_mm: int = 10, disc_mm: int = 4):
+        """Returns (volume, anchors, expected {label: level index})."""
+        height = n_vertebrae * (vert_mm + disc_mm) + disc_mm
+        volume = np.zeros((6, 6, height), dtype=np.int32)
+        anchors: dict[int, float] = {}
+        expected: dict[int, int] = {}
+        z = height
+        # Built head-first: level 8 is T1, and each vertebra sits below its own
+        # disc, which is the numbering the anchors carry.
+        for step, level in enumerate(range(8, 8 + n_vertebrae)):
+            disc_label = 700 + step
+            volume[1:5, 1:5, z - disc_mm:z] = disc_label
+            anchors[level] = float(z - disc_mm / 2.0)
+            z -= disc_mm
+            vert_label = 900 - step
+            volume[1:5, 1:5, z - vert_mm:z] = vert_label
+            expected[vert_label] = level
+            z -= vert_mm
+        return volume, anchors, expected
+
+    def test_levels_come_from_the_anchors_not_the_label_values(self):
+        volume, anchors, expected = self._spine()
+        vertebrae, discs, note = levels_from_disc_anchors(centroids_si(volume), anchors)
+        # The last vertebra has no anchor below it, so it cannot be placed.
+        assert vertebrae == {k: v for k, v in expected.items() if v < max(expected.values())}
+        assert sorted(discs.values()) == sorted(anchors)[:len(discs)]
+        assert "anchored" not in note and "placed from" in note
+
+    def test_a_disc_sitting_on_an_anchor_is_not_counted_as_a_vertebra(self):
+        volume, anchors, _ = self._spine()
+        _, discs, _ = levels_from_disc_anchors(centroids_si(volume), anchors)
+        assert set(discs) <= {700, 701, 702, 703, 704}
+
+    def test_anchors_out_of_order_are_refused(self):
+        volume, anchors, _ = self._spine()
+        upside_down = {k: -z for k, z in anchors.items()}
+        vertebrae, _, note = levels_from_disc_anchors(centroids_si(volume), upside_down)
+        assert vertebrae == {} and "head to foot" in note
+
+    def test_a_single_anchor_is_refused(self):
+        volume, anchors, _ = self._spine()
+        first = sorted(anchors)[0]
+        vertebrae, _, note = levels_from_disc_anchors(centroids_si(volume),
+                                                     {first: anchors[first]})
+        assert vertebrae == {} and "fewer than two" in note
+
+    def test_two_labels_in_one_gap_place_no_level_there(self):
+        volume, anchors, expected = self._spine()
+        # Split one vertebra in two along left-right: the gap is now ambiguous.
+        victim = max(expected, key=lambda label: expected[label] == 8)
+        volume[1:3][volume[1:3] == victim] = 999
+        vertebrae, _, _ = levels_from_disc_anchors(centroids_si(volume), anchors)
+        assert 8 not in vertebrae.values()
+
+    def test_mean_thickness_is_volume_over_footprint(self):
+        volume = np.zeros((4, 9, 10), dtype=np.int32)
+        volume[1:3, 1:3, 2:5] = 5             # 2x2 footprint, 3 slices
+        coords = label_table(volume)[5]
+        assert mean_thickness_mm(coords, si_mm=2.0, ap_size=9) == pytest.approx(6.0)
+        assert mean_thickness_mm(np.zeros((0, 3), dtype=int), 1.0, 9) is None
+
+    def test_mean_thickness_does_not_collide_two_columns_into_one(self):
+        # The footprint is a set of (left-right, anterior-posterior) columns. With
+        # the wrong multiplier two of them share a key, the footprint shrinks and
+        # the thickness comes out too large.
+        volume = np.zeros((3, 40, 6), dtype=np.int32)
+        volume[0, 39, 1:3] = 7                # column (0, 39)
+        volume[1, 0, 1:3] = 7                 # column (1, 0) — collides at *3
+        coords = label_table(volume)[7]
+        assert mean_thickness_mm(coords, si_mm=1.0, ap_size=40) == pytest.approx(2.0)
+
+    def test_slab_area_is_the_median_over_the_range(self):
+        mask = np.zeros((4, 4, 6), dtype=bool)
+        mask[0:2, 0:2, 2] = True              # 4 voxels
+        mask[0:3, 0:2, 3] = True              # 6 voxels
+        mask[0:4, 0:2, 4] = True              # 8 voxels
+        counts = slice_counts(mask)
+        assert counts.tolist() == [0, 0, 4, 6, 8, 0]
+        assert slab_area_mm2(counts, 2, 4, voxel_area_mm2=2.0) == pytest.approx(12.0)
+        assert slab_area_mm2(counts, 0, 1, voxel_area_mm2=2.0) is None
+
+    def test_label_table_groups_every_voxel_by_label(self):
+        volume = np.zeros((3, 3, 3), dtype=np.int32)
+        volume[0, 0, 0] = 4
+        volume[1, :, :] = 9
+        table = label_table(volume)
+        assert sorted(table) == [4, 9]
+        assert table[4].tolist() == [[0, 0, 0]] and len(table[9]) == 9
+        assert label_table(np.zeros((2, 2, 2), dtype=np.int32)) == {}
+
+    def test_segmental_angle_sign_follows_the_direction_of_the_bend(self):
+        straight = {1: np.array([0.0, 0.0, 2.0]), 2: np.array([0.0, 0.0, 1.0]),
+                    3: np.array([0.0, 0.0, 0.0])}
+        assert segmental_angles_deg(straight)[2] == pytest.approx(0.0, abs=1e-6)
+        kyphotic = {**straight, 2: np.array([0.0, -1.0, 1.0])}
+        lordotic = {**straight, 2: np.array([0.0, 1.0, 1.0])}
+        assert segmental_angles_deg(kyphotic)[2] == pytest.approx(90.0)
+        assert segmental_angles_deg(lordotic)[2] == pytest.approx(-90.0)
+
+    def test_level_names_and_indices_round_trip(self):
+        assert sct_level_index("T7") == 14 and sct_level_name(14) == "T7"
+        assert sct_level_index("c1") == 1 and sct_level_index("L5") == 24
+        assert sct_level_index("T13") is None and sct_level_name(99) is None
+
+
+class TestSummariseDistribution:
+    def test_known_sample(self):
+        out = summarise_distribution(list(range(101)))
+        assert out["n"] == 101
+        assert out["median"] == 50.0
+        assert out["iqr"] == [25.0, 75.0]
+        assert out["p5_p95"] == [5.0, 95.0]
+        assert (out["min"], out["max"]) == (0.0, 100.0)
+
+    def test_too_few_subjects_is_none_not_a_smaller_summary(self):
+        assert summarise_distribution(list(range(9))) is None
+        assert summarise_distribution(list(range(10))) is not None
+
+    def test_non_finite_values_reduce_n_and_nothing_else(self):
+        values = list(range(10)) + [float("nan"), float("inf")]
+        out = summarise_distribution(values)
+        assert out["n"] == 10 and out["max"] == 9.0
+
+    def test_min_n_is_overridable_for_callers_that_state_why(self):
+        assert summarise_distribution([1.0, 2.0, 3.0], min_n=3)["n"] == 3
+
+
+class TestPercentileOf:
+    def test_position_in_a_uniform_sample(self):
+        sample = list(range(100))          # 0..99
+        assert percentile_of(-1, sample) == 0.0
+        assert percentile_of(50, sample) == 50.5   # 50 below, itself counted as half
+        assert percentile_of(1000, sample) == 100.0
+
+    def test_ties_count_as_half_so_a_constant_sample_lands_mid(self):
+        assert percentile_of(5, [5] * 20) == 50.0
+
+    def test_missing_value_or_empty_reference_is_none(self):
+        assert percentile_of(None, [1, 2, 3]) is None
+        assert percentile_of(float("nan"), [1, 2, 3]) is None
+        assert percentile_of(1.0, []) is None
+        assert percentile_of(1.0, [float("nan")]) is None

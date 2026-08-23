@@ -25,6 +25,7 @@ python -m spinelab run --dicom /path/study.zip --quality --tta-mirror   # 24+ Г
 python -m spinelab run --only marrow,posterior,report --force marrow
 python -m spinelab run --dicom /path/study.zip --station 2   # второй блок исследования
 python -m spinelab setup --sct --cache ~/spinelab-cache      # + Spinal Cord Toolbox (~3 ГБ)
+python -m spinelab normative --cache ~/spinelab-cache        # референсная когорта (~21 МБ масок)
 python -m spinelab inspect --dicom /path/study.zip  # список серий, без GPU и dcm2niix
 python -m spinelab audit --dicom /path/dicom       # какие PHI-теги есть в заголовках
 python -m spinelab deid  --dicom /path/dicom --out /path/anon
@@ -35,7 +36,7 @@ python -m spinelab stages                          # список этапов
 `inspect` покажет это как две станции, а прогон анализирует одну за раз: `--station 1`,
 затем `--station 2`. Результаты пишутся в `results/station-N`.
 
-Тесты (без GPU и без данных, ~15 с):
+Тесты (без GPU и без данных, ~70 с):
 
 ```bash
 python -m pytest -q
@@ -60,6 +61,7 @@ python -m pytest -q
 | `posterior` | — | сравнение левых и правых фасеточных / поперечных отростков | эвристика |
 | `canal` | — | профиль площади канала, относительное сужение | измерение |
 | `compression` | SCT | шейный канал: вероятность компрессии и aSCOR **против опубликованных порогов** | **порог из внешней когорты** |
+| `normative` | OpenNeuro `ds005616` (CC0) | место каждого уровня в распределении 59 добровольцев: площадь канала и мозга, высота диска, сегментарный угол | измерение |
 | `discs` | — | относительный сигнал дисков по уровням | измерение |
 | `radiomics` | — | first-order + GLCM по телам позвонков | измерение |
 | `agreement` | — | Dice спинного мозга между двумя сегментаторами (контроль) | измерение |
@@ -74,13 +76,14 @@ python -m pytest -q
 spinelab/
   config.py      параметры прогона, кэш весов в Drive, пути
   labels.py      метки апстрима (TPTBox Location, tss_map.json) в одном месте
+  normative.py   референсная когорта ds005616: скачивание масок, измерение, кэш
   sequences.py   распознавание и выбор последовательностей (fat-sat, плоскость)
   analysis.py    чистая математика — всё покрыто тестами
   pipeline.py    раннер этапов с продолжением и изоляцией ошибок
   evidence.py    уровни доказательности
   dicom_audit.py аудит и деидентификация DICOM
   stages/        по одному модулю на этап
-tests/           333 теста, включая сквозной прогон на синтетическом фантоме
+tests/           404 теста, включая сквозной прогон на синтетическом фантоме
 notebooks/
   colab_pipeline.ipynb   рабочий лаунчер (4 ячейки)
   legacy/                старый ноутбук на 57 ячеек, часть выводов отозвана
@@ -90,6 +93,8 @@ docs/
   self-audit-2026-07-27.md  аудит нового кода: 3 реальных бага, что осталось непроверенным
   stack-review-2026-07.md   актуальность стека на июль 2026, что выброшено и почему
   stack-review-2026-08.md   что добавил SCT: первые пороги из внешних когорт
+  research/README.md        указатель: что нашлось за поиск, что применено к снимкам,
+                            какие датасеты не подошли и с какими цифрами это закрыто
   research/                 внешние обзоры, журнал поиска данных, список литературы
                             и каталог критериев (reading-list-2026-08.md)
   clinical-context.md       что эти данные могут и не могут показать
